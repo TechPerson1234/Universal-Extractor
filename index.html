@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexus Universal Extractor | math12393</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+
+  <style>
+    :root { 
+      --bg-void: #050505; --bg-surface: #111111; --bg-panel: #1a1a1a;
+      --nexus-cyan: #00f0ff; --nexus-purple: #8a2be2; --nexus-red: #ff003c;
+      --text-main: #e0e0e0; --text-muted: #666666;
+    }
+    body { background-color: var(--bg-void); color: var(--text-main); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; overflow: hidden; }
+    
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-void); }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--nexus-cyan); }
+
+    /* UI Components */
+    .nexus-panel { background: var(--bg-panel); border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+    .nexus-btn { transition: all 0.2s; border: 1px solid transparent; }
+    .nexus-btn:hover { border-color: var(--nexus-cyan); box-shadow: 0 0 10px rgba(0, 240, 255, 0.2); }
+    .neon-text { text-shadow: 0 0 5px var(--nexus-cyan); }
+    
+    /* Hex Editor */
+    .hex-grid { font-family: 'Courier New', monospace; font-size: 14px; white-space: pre; }
+    .hex-cell { display: inline-block; width: 22px; text-align: center; cursor: crosshair; color: #aaa; transition: 0.1s; }
+    .hex-cell:hover { background: var(--nexus-purple); color: #fff; }
+    
+    /* Audio Visualizer */
+    #audio-canvas { width: 100%; height: 120px; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; }
+  </style>
+</head>
+<body class="h-screen w-screen flex flex-col">
+
+  <header class="h-14 nexus-panel flex items-center justify-between px-6 z-50 shrink-0 border-b-2 border-b-[#00f0ff]/30">
+    <div class="flex items-center gap-4">
+      <i class="fas fa-biohazard text-3xl" style="color: var(--nexus-cyan);"></i>
+      <h1 class="text-2xl font-black tracking-widest uppercase italic neon-text">NEXUS <span class="text-white">EXTRACTOR</span></h1>
+    </div>
+    <div class="flex items-center gap-4">
+      <div id="ram-meter" class="text-xs font-mono text-[#00f0ff] bg-black px-3 py-1 border border-[#00f0ff]/50 rounded">MEM: 0.00 MB</div>
+      <button onclick="NexusCore.packWorkspace()" class="bg-[#00f0ff]/10 text-[#00f0ff] hover:bg-[#00f0ff]/20 px-4 py-1.5 rounded font-bold border border-[#00f0ff] transition">
+        <i class="fas fa-download mr-2"></i>DUMP VFS
+      </button>
+    </div>
+  </header>
+
+  <div class="flex-1 flex overflow-hidden">
+    
+    <aside class="w-72 nexus-panel border-r border-[#333] flex flex-col shrink-0">
+      <div id="drop-zone" class="p-8 text-center border-b border-[#333] cursor-pointer hover:bg-[#222] transition group">
+        <i class="fas fa-satellite-dish text-4xl text-[#666] group-hover:text-[#00f0ff] transition mb-3"></i>
+        <h3 class="font-bold text-sm tracking-wide text-white">UPLINK ESTABLISHED</h3>
+        <p class="text-xs text-[#666] mt-1">Drop Target: ZIP, Media, Binaries</p>
+        <input type="file" id="file-input" class="hidden" multiple>
+      </div>
+      
+      <div class="bg-black/50 px-4 py-2 text-xs font-black text-[#666] uppercase flex justify-between items-center border-b border-[#333]">
+        <span>Virtual File System</span>
+        <i class="fas fa-network-wired text-[#00f0ff]"></i>
+      </div>
+      
+      <div id="vfs-tree" class="flex-1 overflow-y-auto p-2 space-y-1">
+        </div>
+    </aside>
+
+    <main class="flex-1 bg-black flex flex-col relative">
+      <div id="editor-header" class="h-10 bg-[#111] border-b border-[#333] flex items-center px-4 gap-3 overflow-x-auto text-sm font-mono text-[#888]">
+        Awaiting File Selection...
+      </div>
+
+      <div id="editor-surface" class="flex-1 overflow-auto relative p-6 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-[#1a1a1a] to-black">
+        <div class="text-center opacity-20 pointer-events-none">
+          <i class="fas fa-skull text-8xl mb-4 text-white"></i>
+          <h2 class="text-3xl font-black tracking-widest">NEXUS IDLE</h2>
+        </div>
+      </div>
+    </main>
+    
+    <aside class="w-80 nexus-panel border-l border-[#333] flex flex-col shrink-0">
+      <div class="px-4 py-3 border-b border-[#333] font-bold text-sm uppercase text-white flex items-center gap-2 bg-black/40">
+        <i class="fas fa-terminal text-[#00f0ff]"></i> Inspector
+      </div>
+      <div id="tool-panel" class="flex-1 p-5 overflow-y-auto space-y-6">
+        <p class="text-xs text-[#444] text-center font-mono mt-10">> NO DATA TARGET <</p>
+      </div>
+    </aside>
+
+  </div>
+
+  <script>
+    /** =========================================================================
+     * NEXUS CORE: STATE & MEMORY MANAGEMENT
+     * ========================================================================= */
+    const NexusCore = {
+      vfs: new Map(), // Virtual File System
+      activeFile: null,
+
+      init() {
+        this.bindEvents();
+        setInterval(this.updateRamMeter, 2000);
+      },
+
+      updateRamMeter() {
+        let total = 0;
+        NexusCore.vfs.forEach(file => total += file.blob.size);
+        document.getElementById('ram-meter').innerText = `MEM: ${(total / 1024 / 1024).toFixed(2)} MB`;
+      },
+
+      async ingest(file) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        
+        if (['zip', 'apk', 'jar'].includes(ext)) {
+          const zip = new JSZip();
+          try {
+            const archive = await zip.loadAsync(file);
+            Object.keys(archive.files).forEach(async (filename) => {
+              if (!archive.files[filename].dir) {
+                const blob = await archive.files[filename].async('blob');
+                this.vfs.set(filename, { name: filename, blob, type: this.getType(filename) });
+                UI.renderVFS();
+              }
+            });
+          } catch (e) { alert("Archive corrupt: " + e.message); }
+        } else {
+          this.vfs.set(file.name, { name: file.name, blob: file, type: this.getType(file.name) });
+          UI.renderVFS();
+        }
+      },
+
+      getType(filename) {
+        const ext = filename.split('.').pop().toLowerCase();
+        if (['png','jpg','jpeg','webp','gif'].includes(ext)) return 'IMAGE';
+        if (['mp4','webm','mov'].includes(ext)) return 'VIDEO';
+        if (['mp3','wav','ogg'].includes(ext)) return 'AUDIO';
+        if (['txt','json','md','js','html','css','xml'].includes(ext)) return 'TEXT';
+        return 'BINARY';
+      },
+
+      async packWorkspace() {
+        if (this.vfs.size === 0) return alert("VFS is empty.");
+        const zip = new JSZip();
+        this.vfs.forEach((data, name) => zip.file(name, data.blob));
+        const blob = await zip.generateAsync({ type: 'blob' });
+        saveAs(blob, 'NEXUS_DUMP.zip');
+      },
+
+      bindEvents() {
+        const drop = document.getElementById('drop-zone');
+        const input = document.getElementById('file-input');
+        drop.onclick = () => input.click();
+        drop.ondragover = (e) => { e.preventDefault(); drop.style.borderColor = '#00f0ff'; };
+        drop.ondragleave = () => drop.style.borderColor = '#333';
+        drop.ondrop = (e) => {
+          e.preventDefault(); drop.style.borderColor = '#333';
+          Array.from(e.dataTransfer.files).forEach(f => this.ingest(f));
+        };
+        input.onchange = (e) => Array.from(e.target.files).forEach(f => this.ingest(f));
+      }
+    };
+
+    /** =========================================================================
+     * UI & ROUTING
+     * ========================================================================= */
+    const UI = {
+      renderVFS() {
+        const tree = document.getElementById('vfs-tree');
+        tree.innerHTML = '';
+        NexusCore.vfs.forEach((file, name) => {
+          const el = document.createElement('div');
+          el.className = 'px-3 py-2 text-sm text-[#ccc] hover:bg-[#222] hover:text-[#00f0ff] cursor-pointer rounded flex items-center justify-between group transition';
+          
+          let icon = 'fa-file';
+          if(file.type === 'IMAGE') icon = 'fa-image text-[#8a2be2]';
+          if(file.type === 'VIDEO') icon = 'fa-film text-[#ff003c]';
+          if(file.type === 'AUDIO') icon = 'fa-wave-square text-[#00f0ff]';
+          if(file.type === 'BINARY') icon = 'fa-microchip text-[#666]';
+          
+          el.innerHTML = `
+            <div class="flex items-center gap-3 truncate">
+              <i class="fas ${icon} w-4 text-center"></i>
+              <span class="truncate">${name}</span>
+            </div>
+            <i class="fas fa-chevron-right text-xs opacity-0 group-hover:opacity-100"></i>
+          `;
+          el.onclick = () => this.routeEditor(name);
+          tree.appendChild(el);
+        });
+      },
+
+      routeEditor(filename) {
+        NexusCore.activeFile = NexusCore.vfs.get(filename);
+        document.getElementById('editor-header').innerHTML = `<span class="text-white font-bold">${filename}</span> <span class="text-[#666]">| ${NexusCore.activeFile.type}</span>`;
+        
+        const surface = document.getElementById('editor-surface');
+        const tools = document.getElementById('tool-panel');
+        surface.innerHTML = ''; tools.innerHTML = '';
+
+        const type = NexusCore.activeFile.type;
+        if (type === 'IMAGE') ImageLab.init(surface, tools);
+        else if (type === 'VIDEO') VideoLab.init(surface, tools);
+        else if (type === 'AUDIO') AudioLab.init(surface, tools);
+        else if (type === 'TEXT') TextLab.init(surface, tools);
+        else HexLab.init(surface, tools);
+      }
+    };
+
+    /** =========================================================================
+     * MODULE 1: IMAGE LAB (Fabric.js + Advanced Filters)
+     * ========================================================================= */
+    const ImageLab = {
+      canvas: null,
+      init(surface, tools) {
+        const url = URL.createObjectURL(NexusCore.activeFile.blob);
+        surface.innerHTML = `<canvas id="img-canvas" class="border border-[#333] shadow-2xl shadow-[#00f0ff]/10"></canvas>`;
+        
+        tools.innerHTML = `
+          <div class="space-y-5">
+            <div>
+              <h3 class="text-xs font-bold text-[#666] uppercase mb-2">Image Matrix</h3>
+              <button onclick="ImageLab.save()" class="w-full bg-[#00f0ff]/20 text-[#00f0ff] border border-[#00f0ff] py-2 rounded text-sm hover:bg-[#00f0ff] hover:text-black font-bold transition">
+                COMMIT CHANGES
+              </button>
+            </div>
+            <div class="border-t border-[#333] pt-4">
+              <h3 class="text-xs font-bold text-[#666] uppercase mb-3">Filter Overlays</h3>
+              <button onclick="ImageLab.applyFilter('Invert')" class="nexus-btn w-full bg-[#222] text-white py-1.5 rounded text-sm mb-2">Invert Colors</button>
+              <button onclick="ImageLab.applyFilter('Sepia')" class="nexus-btn w-full bg-[#222] text-white py-1.5 rounded text-sm mb-2">Sepia Inject</button>
+              <button onclick="ImageLab.applyFilter('Noise')" class="nexus-btn w-full bg-[#222] text-white py-1.5 rounded text-sm mb-2">Add Noise</button>
+            </div>
+            <div class="border-t border-[#333] pt-4">
+              <h3 class="text-xs font-bold text-[#666] uppercase mb-3">Draw Mode</h3>
+              <div class="flex gap-2">
+                <input type="color" id="draw-color" value="#00f0ff" class="w-10 h-8 bg-transparent cursor-pointer" onchange="ImageLab.updateBrush()">
+                <input type="range" id="draw-size" min="1" max="50" value="5" class="flex-1" onchange="ImageLab.updateBrush()">
+              </div>
+              <button onclick="ImageLab.toggleDraw()" class="mt-2 w-full border border-[#666] text-[#ccc] hover:border-white py-1.5 rounded text-sm">Toggle Brush</button>
+            </div>
+          </div>
+        `;
+
+        this.canvas = new fabric.Canvas('img-canvas');
+        fabric.Image.fromURL(url, (img) => {
+          const scale = Math.min(800 / img.width, 600 / img.height, 1);
+          img.scale(scale);
+          this.canvas.setDimensions({ width: img.width * scale, height: img.height * scale });
+          this.canvas.setBackgroundImage(img, this.canvas.renderAll.bind(this.canvas));
+          URL.revokeObjectURL(url);
+        });
+      },
+
+      applyFilter(type) {
+        const img = this.canvas.backgroundImage;
+        if (!img) return;
+        if(type === 'Invert') img.filters.push(new fabric.Image.filters.Invert());
+        if(type === 'Sepia') img.filters.push(new fabric.Image.filters.Sepia());
+        if(type === 'Noise') img.filters.push(new fabric.Image.filters.Noise({ noise: 100 }));
+        img.applyFilters();
+        this.canvas.renderAll();
+      },
+
+      toggleDraw() {
+        this.canvas.isDrawingMode = !this.canvas.isDrawingMode;
+        this.updateBrush();
+      },
+
+      updateBrush() {
+        if(this.canvas.freeDrawingBrush) {
+          this.canvas.freeDrawingBrush.color = document.getElementById('draw-color').value;
+          this.canvas.freeDrawingBrush.width = parseInt(document.getElementById('draw-size').value, 10);
+        }
+      },
+
+      save() {
+        const url = this.canvas.toDataURL({ format: 'png' });
+        fetch(url).then(res => res.blob()).then(blob => {
+          NexusCore.vfs.set(NexusCore.activeFile.name, { ...NexusCore.activeFile, blob });
+          alert("Image matrix committed to memory.");
+        });
+      }
+    };
+
+    /** =========================================================================
+     * MODULE 2: VIDEO LAB (MediaRecorder & Timeline)
+     * ========================================================================= */
+    const VideoLab = {
+      init(surface, tools) {
+        const url = URL.createObjectURL(NexusCore.activeFile.blob);
+        
+        surface.innerHTML = `
+          <div class="w-full max-w-4xl flex flex-col gap-4">
+            <video id="vid-player" src="${url}" controls class="w-full rounded border border-[#333] shadow-lg"></video>
+            <div class="bg-[#111] border border-[#333] rounded p-4">
+              <div class="flex justify-between text-xs font-mono text-[#00f0ff] mb-2">
+                <span>TIME: <span id="vid-time">0.00</span>s</span>
+              </div>
+              <input type="range" id="vid-scrub" min="0" max="100" value="0" class="w-full cursor-pointer">
+            </div>
+          </div>
+        `;
+
+        tools.innerHTML = `
+          <div class="space-y-4">
+            <button onclick="VideoLab.ripFrame()" class="w-full bg-[#111] border border-[#ff003c] text-[#ff003c] hover:bg-[#ff003c] hover:text-white py-2 rounded font-bold transition">
+              <i class="fas fa-camera mr-2"></i> RIP FRAME TO VFS
+            </button>
+            <div class="border-t border-[#333] pt-4">
+              <label class="block text-xs text-[#666] mb-1">Playback Speed</label>
+              <select id="vid-speed" onchange="document.getElementById('vid-player').playbackRate = this.value" class="w-full bg-[#222] border border-[#444] text-white p-2 rounded outline-none">
+                <option value="0.5">0.5x (Slow)</option>
+                <option value="1" selected>1.0x (Normal)</option>
+                <option value="2">2.0x (Fast)</option>
+              </select>
+            </div>
+          </div>
+        `;
+
+        const vid = document.getElementById('vid-player');
+        const scrub = document.getElementById('vid-scrub');
+        
+        vid.ontimeupdate = () => {
+          document.getElementById('vid-time').innerText = vid.currentTime.toFixed(2);
+          if(!vid.paused) scrub.value = (vid.currentTime / vid.duration) * 100;
+        };
+        scrub.oninput = () => { vid.currentTime = (scrub.value / 100) * vid.duration; };
+      },
+
+      ripFrame() {
+        const vid = document.getElementById('vid-player');
+        const canvas = document.createElement('canvas');
+        canvas.width = vid.videoWidth; canvas.height = vid.videoHeight;
+        canvas.getContext('2d').drawImage(vid, 0, 0);
+        canvas.toBlob(blob => {
+          const name = `RIP_${Math.floor(vid.currentTime)}.png`;
+          NexusCore.vfs.set(name, { name, blob, type: 'IMAGE' });
+          UI.renderVFS();
+          alert(`Frame ripped: ${name}`);
+        });
+      }
+    };
+
+    /** =========================================================================
+     * MODULE 3: AUDIO LAB (Waveform Visualizer)
+     * ========================================================================= */
+    const AudioLab = {
+      audioCtx: null,
+      init(surface, tools) {
+        const url = URL.createObjectURL(NexusCore.activeFile.blob);
+        
+        surface.innerHTML = `
+          <div class="w-full max-w-3xl bg-[#111] border border-[#333] p-6 rounded-lg shadow-2xl">
+            <h2 class="text-[#00f0ff] font-mono text-xl mb-4 text-center"><i class="fas fa-headphones mr-2"></i>AUDIO ANALYZER</h2>
+            <canvas id="audio-canvas"></canvas>
+            <audio id="audio-player" src="${url}" controls class="w-full mt-4"></audio>
+          </div>
+        `;
+
+        tools.innerHTML = `<p class="text-xs text-[#666]">Audio visualization active. Hit play in the center console.</p>`;
+        
+        this.setupVisualizer();
+      },
+
+      setupVisualizer() {
+        const audio = document.getElementById('audio-player');
+        const canvas = document.getElementById('audio-canvas');
+        const ctx = canvas.getContext('2d');
+        
+        audio.onplay = () => {
+          if(!this.audioCtx) {
+            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = this.audioCtx.createMediaElementSource(audio);
+            const analyzer = this.audioCtx.createAnalyser();
+            source.connect(analyzer);
+            analyzer.connect(this.audioCtx.destination);
+            analyzer.fftSize = 256;
+            const bufferLength = analyzer.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            const draw = () => {
+              requestAnimationFrame(draw);
+              analyzer.getByteFrequencyData(dataArray);
+              ctx.fillStyle = '#0a0a0a';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              
+              const barWidth = (canvas.width / bufferLength) * 2.5;
+              let x = 0;
+              for(let i = 0; i < bufferLength; i++) {
+                const barHeight = dataArray[i] / 2;
+                ctx.fillStyle = `rgb(${barHeight + 100}, 0, 255)`; // Nexus Purple
+                ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                x += barWidth + 1;
+              }
+            };
+            draw();
+          }
+        };
+      }
+    };
+
+    /** =========================================================================
+     * MODULE 4: HEX LAB (Binary Editor)
+     * ========================================================================= */
+    const HexLab = {
+      async init(surface, tools) {
+        const buffer = await NexusCore.activeFile.blob.slice(0, 1024 * 50).arrayBuffer(); // Load first 50KB to prevent lockup
+        const data = new Uint8Array(buffer);
+        
+        surface.innerHTML = `
+          <div class="w-full h-full p-4 overflow-auto bg-[#0a0a0a]">
+            <div id="hex-grid" class="hex-grid"></div>
+          </div>
+        `;
+        
+        tools.innerHTML = `
+          <button class="w-full bg-[#111] border border-[#00f0ff] text-[#00f0ff] hover:bg-[#00f0ff] hover:text-black py-2 rounded font-bold transition">
+            <i class="fas fa-save mr-2"></i> OVERWRITE BINARY
+          </button>
+          <p class="text-[10px] text-[#666] mt-4">Showing first 50KB of binary stream to prevent browser memory leak.</p>
+        `;
+
+        this.renderHex(data);
+      },
+
+      renderHex(data) {
+        const container = document.getElementById('hex-grid');
+        let html = '';
+        for (let i = 0; i < Math.min(data.length, 2000); i += 16) {
+          let hexRow = '', asciiRow = '';
+          const offset = i.toString(16).padStart(8, '0').toUpperCase();
+          for (let j = 0; j < 16; j++) {
+            if (i + j < data.length) {
+              const byte = data[i+j];
+              hexRow += `<span class="hex-cell">${byte.toString(16).padStart(2,'0').toUpperCase()}</span> `;
+              asciiRow += (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
+            }
+          }
+          html += `<span class="text-[#444] mr-4">${offset}</span> ${hexRow} <span class="text-[#00f0ff] ml-4 border-l border-[#333] pl-4">${asciiRow.replace(/</g, '&lt;')}</span>\n`;
+        }
+        container.innerHTML = html;
+      }
+    };
+
+    /** =========================================================================
+     * MODULE 5: TEXT LAB (Code Editor)
+     * ========================================================================= */
+    const TextLab = {
+      async init(surface, tools) {
+        const text = await NexusCore.activeFile.blob.text();
+        surface.innerHTML = `<textarea id="txt-editor" class="w-full h-full bg-[#0a0a0a] text-[#ccc] font-mono p-4 outline-none resize-none border-none">${text}</textarea>`;
+        tools.innerHTML = `<button onclick="TextLab.save()" class="w-full bg-[#111] border border-[#00f0ff] text-[#00f0ff] hover:bg-[#00f0ff] hover:text-black py-2 rounded font-bold transition"><i class="fas fa-save mr-2"></i> SAVE SCRIPT</button>`;
+      },
+      save() {
+        const val = document.getElementById('txt-editor').value;
+        const blob = new Blob([val], { type: 'text/plain' });
+        NexusCore.vfs.set(NexusCore.activeFile.name, { ...NexusCore.activeFile, blob });
+        alert("Text matrix updated.");
+      }
+    };
+
+    // BOOT SEQUENCE
+    NexusCore.init();
+  </script>
+</body>
+</html>
