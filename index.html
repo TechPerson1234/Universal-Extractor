@@ -3,10 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NEXUS UNIVERSAL EXTRACTOR v3.0 | math12393</title>
+  <title>NEXUS UNIVERSAL EXTRACTOR | math12393</title>
   <link rel="icon" type="image/x-icon" href="favicon.ico">
-  
-  <!-- CDN Dependencies -->
   <script src="https://cdn.tailwindcss.com">
   </script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -48,21 +46,17 @@
       flex-direction: column;
     }
 
-    /* Scrollbars */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: var(--bg-void); }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--nexus-cyan); }
 
-    /* UI Components */
     .nexus-panel { background: var(--bg-panel); border: 1px solid #333; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
     .nexus-btn { transition: all var(--transition-speed); border: 1px solid transparent; cursor: pointer; }
     .nexus-btn:hover { border-color: var(--nexus-cyan); box-shadow: 0 0 10px rgba(0,240,255,0.2); }
     .neon-text { text-shadow: 0 0 5px var(--nexus-cyan); }
     .tab-active { border-bottom: 2px solid var(--nexus-cyan); color: var(--nexus-cyan); }
     .hidden-file-input { display: none; }
-    
-    /* Context Menu */
     .context-menu {
       position: fixed;
       background: var(--bg-panel);
@@ -86,7 +80,7 @@
       color: var(--nexus-cyan);
     }
 
-    /* Tabs */
+    
     .tab-bar {
       display: flex;
       overflow-x: auto;
@@ -105,7 +99,7 @@
       background: #1a1a1a;
     }
 
-    /* Search Bar */
+  
     .search-container {
       display: flex;
       align-items: center;
@@ -126,8 +120,6 @@
   </style>
 </head>
 <body class="h-screen w-screen flex flex-col">
-
-  <!-- Header -->
   <header class="h-14 nexus-panel flex items-center justify-between px-6 z-50 shrink-0 border-b-2 border-b-[#00f0ff]/30">
     <div class="flex items-center gap-4">
       <i class="fas fa-biohazard text-3xl" style="color: var(--nexus-cyan);"></i>
@@ -147,11 +139,7 @@
       </button>
     </div>
   </header>
-
-  <!-- Main Layout -->
   <div class="flex-1 flex overflow-hidden">
-    
-    <!-- Left Sidebar: VFS -->
     <aside class="w-72 nexus-panel border-r border-[#333] flex flex-col shrink-0">
       <div id="drop-zone" class="p-6 text-center border-b border-[#333] cursor-pointer hover:bg-[#222] transition group">
         <i class="fas fa-satellite-dish text-4xl text-[#666] group-hover:text-[#00f0ff] transition mb-3"></i>
@@ -169,23 +157,14 @@
       </div>
       
       <div id="vfs-tree" class="flex-1 overflow-y-auto p-2 space-y-1">
-        <!-- Populated dynamically -->
       </div>
     </aside>
-
-    <!-- Center: Editor Area with Tabs -->
     <main class="flex-1 bg-black flex flex-col relative">
-      <!-- Tab Bar -->
       <div id="tab-bar" class="tab-bar h-10">
-        <!-- Dynamic tabs -->
       </div>
-
-      <!-- Editor Header -->
       <div id="editor-header" class="h-8 bg-[#111] border-b border-[#333] flex items-center px-4 gap-3 overflow-x-auto text-xs font-mono text-[#888]">
         Awaiting File Selection...
       </div>
-
-      <!-- Editor Surface -->
       <div id="editor-surface" class="flex-1 overflow-auto relative p-6 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-[#1a1a1a] to-black">
         <div class="text-center opacity-20 pointer-events-none">
           <i class="fas fa-skull text-8xl mb-4 text-white"></i>
@@ -193,8 +172,6 @@
         </div>
       </div>
     </main>
-    
-    <!-- Right Sidebar: Inspector & Tools -->
     <aside class="w-80 nexus-panel border-l border-[#333] flex flex-col shrink-0">
       <div class="px-4 py-3 border-b border-[#333] font-bold text-sm uppercase text-white flex items-center gap-2 bg-black/40">
         <i class="fas fa-terminal text-[#00f0ff]"></i> Inspector
@@ -204,8 +181,6 @@
       </div>
     </aside>
   </div>
-
-  <!-- Context Menu -->
   <div id="context-menu" class="context-menu">
     <div class="context-menu-item" data-action="rename"><i class="fas fa-edit"></i> Rename</div>
     <div class="context-menu-item" data-action="delete"><i class="fas fa-trash"></i> Delete</div>
@@ -214,38 +189,20 @@
     <div class="context-menu-item" data-action="checksum"><i class="fas fa-shield-alt"></i> Checksum</div>
     <div class="context-menu-item" data-action="info"><i class="fas fa-info-circle"></i> Properties</div>
   </div>
-
-  <!-- Worker Simulation (inline for simplicity, but we'll use a Web Worker for heavy tasks) -->
   <script>
-    /**
-     * =========================================================================
-     * NEXUS CORE v3.0 - Complete Universal Extractor
-     * =========================================================================
-     * Enhanced with: worker threads, plugin system, tabs, themes, context menus,
-     * advanced image/video/audio/hex/text modules, 3D viewer, PDF support.
-     * Total lines will exceed 1500.
-     */
-    
-    // ------------------------------------------------------------
-    // 1. CONFIGURATION & GLOBALS
-    // ------------------------------------------------------------
     const CONFIG = {
-      MAX_FILE_PREVIEW_SIZE: 50 * 1024 * 1024, // 50MB limit for full preview
+      MAX_FILE_PREVIEW_SIZE: 50 * 1024 * 1024,
       HEX_CHUNK_SIZE: 1024 * 50,
       ENABLE_WORKERS: true,
       THEMES: ['cyberpunk', 'matrix', 'light'],
       DEFAULT_THEME: 'cyberpunk',
     };
-
-    // ------------------------------------------------------------
-    // 2. STATE MANAGER (Simple store with undo/redo)
-    // ------------------------------------------------------------
     class StateManager {
       constructor() {
         this.history = [];
         this.future = [];
         this.listeners = [];
-        this.vfs = new Map(); // current state
+        this.vfs = new Map(); 
         this.activeFile = null;
         this.openTabs = [];
       }
@@ -311,9 +268,6 @@
 
     const AppState = new StateManager();
 
-    // ------------------------------------------------------------
-    // 3. WORKER MANAGER (for heavy operations)
-    // ------------------------------------------------------------
     class WorkerManager {
       constructor() {
         this.workers = {};
@@ -325,12 +279,12 @@
       }
 
       _initWorkers() {
-        // Create inline blob workers
+      
         const imageWorkerCode = `
           self.onmessage = function(e) {
             const { id, type, data } = e.data;
             if (type === 'applyFilter') {
-              // Simulate heavy filter processing
+              
               const result = { ...data, filtered: true };
               self.postMessage({ id, result });
             }
@@ -339,12 +293,12 @@
         const blob = new Blob([imageWorkerCode], { type: 'application/javascript' });
         this.workers.image = new Worker(URL.createObjectURL(blob));
 
-        // Audio worker
+        
         const audioWorkerCode = `
           self.onmessage = function(e) {
             const { id, type, buffer } = e.data;
             if (type === 'analyze') {
-              // Return dummy frequency data
+             
               const freq = new Float32Array(128);
               for (let i=0; i<128; i++) freq[i] = Math.random();
               self.postMessage({ id, result: freq }, [freq.buffer]);
@@ -358,7 +312,6 @@
       runTask(workerType, type, data, transfer) {
         return new Promise((resolve, reject) => {
           if (!this.workers[workerType]) {
-            // Fallback: run synchronously (or with timeout)
             setTimeout(() => resolve({ filtered: true }), 100);
             return;
           }
@@ -381,9 +334,7 @@
 
     const Workers = new WorkerManager();
 
-    // ------------------------------------------------------------
-    // 4. PLUGIN SYSTEM (Module Registration)
-    // ------------------------------------------------------------
+    
     const PluginRegistry = {
       modules: {},
       register(name, module) {
@@ -394,9 +345,6 @@
       }
     };
 
-    // ------------------------------------------------------------
-    // 5. UTILITY FUNCTIONS
-    // ------------------------------------------------------------
     function generateUUID() {
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random() * 16 | 0;
@@ -432,12 +380,10 @@
       return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    // ------------------------------------------------------------
-    // 6. VFS (Virtual File System) with folders support
-    // ------------------------------------------------------------
+
     class VirtualFileSystem {
       constructor() {
-        this.files = new Map(); // fullPath -> { name, blob, type, size, created, modified }
+        this.files = new Map(); 
         this.folders = new Set(['/']);
       }
 
@@ -453,7 +399,7 @@
           path: path
         };
         this.files.set(path, file);
-        // Ensure parent folders exist
+ 
         const parts = path.split('/');
         let current = '';
         for (let i = 0; i < parts.length - 1; i++) {
@@ -508,9 +454,7 @@
 
     const VFS = new VirtualFileSystem();
 
-    // ------------------------------------------------------------
-    // 7. THEME MANAGER
-    // ------------------------------------------------------------
+ 
     const ThemeManager = {
       current: CONFIG.DEFAULT_THEME,
       apply(theme) {
@@ -534,7 +478,7 @@
             root.style.setProperty('--text-main', '#111111');
             root.style.setProperty('--text-muted', '#666666');
             break;
-          default: // cyberpunk
+          default: 
             root.style.setProperty('--bg-void', '#050505');
             root.style.setProperty('--bg-surface', '#111111');
             root.style.setProperty('--bg-panel', '#1a1a1a');
@@ -559,9 +503,8 @@
       }
     };
 
-    // ------------------------------------------------------------
-    // 8. UI CORE
-    // ------------------------------------------------------------
+
+
     const UI = {
       currentFolder: '/',
       
@@ -577,7 +520,7 @@
       },
 
       bindGlobalEvents() {
-        // Drop zone
+        
         const drop = document.getElementById('drop-zone');
         const input = document.getElementById('file-input');
         drop.addEventListener('click', () => input.click());
@@ -589,27 +532,27 @@
         });
         input.addEventListener('change', (e) => Array.from(e.target.files).forEach(f => NexusCore.ingest(f)));
 
-        // Global search
+        
         document.getElementById('global-search').addEventListener('input', (e) => {
           const results = VFS.search(e.target.value);
           this.highlightSearchResults(results);
         });
 
-        // Context menu
+        
         document.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           const menu = document.getElementById('context-menu');
           menu.style.display = 'flex';
           menu.style.left = e.clientX + 'px';
           menu.style.top = e.clientY + 'px';
-          // Store target element data
+          
           menu.dataset.target = e.target.closest('.vfs-item')?.dataset?.path || '';
         });
         document.addEventListener('click', () => {
           document.getElementById('context-menu').style.display = 'none';
         });
 
-        // Context menu actions
+        
         document.querySelectorAll('.context-menu-item').forEach(item => {
           item.addEventListener('click', (e) => {
             const action = item.dataset.action;
@@ -654,7 +597,7 @@
           });
         });
 
-        // Keyboard shortcuts
+        
         document.addEventListener('keydown', (e) => {
           if (e.ctrlKey && e.key === 'z') { e.preventDefault(); AppState.undo(); }
           if (e.ctrlKey && e.key === 'y') { e.preventDefault(); AppState.redo(); }
@@ -667,7 +610,7 @@
         tree.innerHTML = '';
         const contents = VFS.listFolder(this.currentFolder);
         
-        // Up button if not root
+        
         if (this.currentFolder !== '/') {
           const upEl = document.createElement('div');
           upEl.className = 'px-3 py-2 text-sm text-[#666] hover:bg-[#222] cursor-pointer rounded flex items-center gap-2';
@@ -727,7 +670,7 @@
         const file = VFS.files.get(path);
         if (!file) return;
         
-        // Check if already open in a tab
+        
         if (!AppState.openTabs.includes(path)) {
           AppState.openTabs.push(path);
         }
@@ -790,7 +733,7 @@
         if (module) {
           module.init(surface, tools, file);
         } else {
-          // Default: Hex or Text depending on size
+          
           if (file.size < 1024 * 1024) {
             TextLab.init(surface, tools, file);
           } else {
@@ -807,7 +750,7 @@
       },
 
       highlightSearchResults(results) {
-        // Highlight matching files in VFS tree (simple approach)
+        
         document.querySelectorAll('.vfs-item').forEach(el => {
           el.style.background = '';
         });
@@ -826,9 +769,7 @@
       }
     };
 
-    // ------------------------------------------------------------
-    // 9. MODULE: IMAGE LAB (Advanced with layers, filters, drawing)
-    // ------------------------------------------------------------
+ 
     const ImageLab = {
       canvas: null,
       layers: [],
@@ -877,7 +818,7 @@
           const scale = Math.min(800 / img.width, 600 / img.height, 1);
           img.scale(scale);
           this.canvas.setDimensions({ width: img.width * scale, height: img.height * scale });
-          // Main background layer
+          
           this.layers.push({ type: 'image', obj: img, name: 'Background' });
           this.canvas.setBackgroundImage(img, this.canvas.renderAll.bind(this.canvas));
           this.renderLayerList();
@@ -974,9 +915,7 @@
     };
     PluginRegistry.register('IMAGE', ImageLab);
 
-    // ------------------------------------------------------------
-    // 10. MODULE: VIDEO LAB (Enhanced with trimming, speed, frame extraction)
-    // ------------------------------------------------------------
+    
     const VideoLab = {
       init(surface, tools, file) {
         const url = URL.createObjectURL(file.blob);
@@ -1032,9 +971,7 @@
     };
     PluginRegistry.register('VIDEO', VideoLab);
 
-    // ------------------------------------------------------------
-    // 11. MODULE: AUDIO LAB (Enhanced with effects, mixer, waveform)
-    // ------------------------------------------------------------
+  
     const AudioLab = {
       audioCtx: null,
       sourceNode: null,
@@ -1099,7 +1036,7 @@
       },
       
       applyEffect(type) {
-        // Simulate effect (real implementation would use convolver etc.)
+        
         alert(`Applied ${type} effect (simulation).`);
       },
       
@@ -1109,9 +1046,7 @@
     };
     PluginRegistry.register('AUDIO', AudioLab);
 
-    // ------------------------------------------------------------
-    // 12. MODULE: HEX LAB (Enhanced virtual scrolling, search)
-    // ------------------------------------------------------------
+
     const HexLab = {
       offset: 0,
       chunkSize: 512,
@@ -1184,9 +1119,7 @@
     };
     PluginRegistry.register('BINARY', HexLab);
 
-    // ------------------------------------------------------------
-    // 13. MODULE: TEXT LAB (Monaco-like simple editor)
-    // ------------------------------------------------------------
+   
     const TextLab = {
       async init(surface, tools, file) {
         const text = await file.blob.text();
@@ -1202,9 +1135,7 @@
     };
     PluginRegistry.register('TEXT', TextLab);
 
-    // ------------------------------------------------------------
-    // 14. MODULE: 3D MODEL VIEWER (Three.js)
-    // ------------------------------------------------------------
+ 
     const ModelLab = {
       scene: null, camera: null, renderer: null,
       init(surface, tools, file) {
@@ -1234,7 +1165,7 @@
         const url = URL.createObjectURL(file.blob);
         const ext = file.name.split('.').pop().toLowerCase();
         if(ext === 'obj') {
-          // OBJ loader not included for brevity; fallback to box
+         
           this.addBox();
         } else {
           this.addBox();
@@ -1249,9 +1180,7 @@
     };
     PluginRegistry.register('MODEL', ModelLab);
 
-    // ------------------------------------------------------------
-    // 15. MODULE: PDF VIEWER (pdf.js)
-    // ------------------------------------------------------------
+ 
     const PdfLab = {
       async init(surface, tools, file) {
         surface.innerHTML = `<div class="w-full h-full overflow-auto"><canvas id="pdf-canvas"></canvas></div>`;
@@ -1270,9 +1199,7 @@
     };
     PluginRegistry.register('PDF', PdfLab);
 
-    // ------------------------------------------------------------
-    // 16. NEXUS CORE: Main controller
-    // ------------------------------------------------------------
+
     const NexusCore = {
       async ingest(file) {
         const ext = file.name.split('.').pop().toLowerCase();
@@ -1313,16 +1240,12 @@
         ThemeManager.toggle();
       }
     };
-
-    // ------------------------------------------------------------
-    // 17. INITIALIZATION
-    // ------------------------------------------------------------
     window.addEventListener('load', () => {
       UI.init();
-      // Register additional modules not already registered
+  
       PluginRegistry.register('ARCHIVE', { init(surface,tools,file){ surface.innerHTML = '<p>Archive browsing not directly supported; extract first.</p>'; } });
       
-      // Expose for HTML onclick handlers
+   
       window.NexusCore = NexusCore;
       window.UI = UI;
       window.ImageLab = ImageLab;
