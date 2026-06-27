@@ -8,9 +8,12 @@
 export class StateManager {
   constructor(options = {}) {
     this.maxHistory = options.maxHistory || 50;
-    this.history = []; // array of state objects
+    this.history = [];
     this.currentIndex = -1;
     this.enabled = true;
+
+    // Load persisted history from localStorage
+    this._loadPersisted();
   }
 
   /**
@@ -25,8 +28,7 @@ export class StateManager {
       this.history = this.history.slice(0, this.currentIndex + 1);
     }
 
-    // Add new state
-    // Deep clone to avoid mutation
+    // Add new state (deep clone)
     const cloned = this._cloneState(state);
     this.history.push(cloned);
     this.currentIndex = this.history.length - 1;
@@ -37,7 +39,7 @@ export class StateManager {
       this.currentIndex--;
     }
 
-    // Save to localStorage for crash recovery? (optional)
+    // Persist to localStorage
     this._persist();
   }
 
@@ -99,13 +101,12 @@ export class StateManager {
   // Private helpers
   // ---------------------------------------------------------------------------
   _cloneState(state) {
-    // Simple deep clone using JSON (works for plain objects with no functions)
+    // Deep clone using JSON (works for plain objects with no functions)
     return JSON.parse(JSON.stringify(state));
   }
 
   _persist() {
     try {
-      // Store only the history (but we might compress)
       const data = JSON.stringify({
         history: this.history,
         currentIndex: this.currentIndex,
@@ -131,14 +132,5 @@ export class StateManager {
     } catch (e) {
       // Ignore
     }
-  }
-
-  // Optionally call _loadPersisted in constructor to restore history across sessions
-  constructor(options = {}) {
-    this.maxHistory = options.maxHistory || 50;
-    this.history = [];
-    this.currentIndex = -1;
-    this.enabled = true;
-    this._loadPersisted();
   }
 }
