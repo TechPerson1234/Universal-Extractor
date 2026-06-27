@@ -1,5 +1,5 @@
 // =============================================================================
-// src/core/VFS.js
+// src/core/VFS.js (CORRECTED)
 // =============================================================================
 // Virtual File System with IndexedDB persistence, file/folder operations,
 // search, and metadata management.
@@ -28,6 +28,7 @@ export class VFS {
     this.files = new Map(); // path -> file object { name, blob, type, size, created, modified, path, metadata }
     this.folders = new Set(['/']);
     this.initialized = false;
+    this._changeListeners = [];
   }
 
   // ---------------------------------------------------------------------------
@@ -71,8 +72,6 @@ export class VFS {
       });
       // Reconstruct files
       for (const entry of all) {
-        // Blob stored as ArrayBuffer? We'll store as blob directly using IndexedDB's blob support
-        // but we need to convert back to Blob if stored as ArrayBuffer.
         let blob = entry.blob;
         if (entry.blob && entry.blob instanceof ArrayBuffer) {
           blob = new Blob([entry.blob], { type: entry.mimeType || 'application/octet-stream' });
@@ -109,12 +108,8 @@ export class VFS {
     try {
       const tx = this.db.transaction(this.storeName, 'readwrite');
       const store = tx.objectStore(this.storeName);
-      // Clear existing
       store.clear();
-      // Add all files
       for (const [path, file] of this.files) {
-        // Store blob as blob (IndexedDB supports Blob directly)
-        // But to be safe, we can store as ArrayBuffer if blob is not supported? Blob works.
         const entry = {
           path: path,
           name: file.name,
@@ -153,14 +148,12 @@ export class VFS {
       metadata: {},
     };
     this.files.set(path, file);
-    // Ensure parent folders exist
     const parts = path.split('/');
     let current = '';
     for (let i = 0; i < parts.length - 1; i++) {
       current += (current ? '/' : '') + parts[i];
       this.folders.add(current || '/');
     }
-    // Trigger event (if event bus available)
     this._emitChange();
     return file;
   }
@@ -168,7 +161,6 @@ export class VFS {
   removeFile(path) {
     if (!this.files.has(path)) return false;
     this.files.delete(path);
-    // Optionally clean up empty folders? Leave as is for now.
     this._emitChange();
     return true;
   }
@@ -190,16 +182,13 @@ export class VFS {
 
   listFolder(folderPath = '/') {
     const contents = [];
-    // Ensure folderPath ends with / for consistency, except root
     const base = folderPath === '/' ? '/' : folderPath + '/';
     for (const [path, file] of this.files) {
       if (path.startsWith(base) && path !== base) {
         const relative = path.substring(base.length);
         if (!relative.includes('/')) {
-          // Direct child file
           contents.push({ type: 'file', ...file, path });
         } else {
-          // Child folder
           const folderName = relative.split('/')[0];
           const folderPath = base + folderName;
           if (!contents.some(c => c.type === 'folder' && c.path === folderPath)) {
@@ -208,7 +197,6 @@ export class VFS {
         }
       }
     }
-    // Also include folders that exist but have no files yet (if in folders set)
     for (const folder of this.folders) {
       if (folder.startsWith(base) && folder !== base && !folder.includes('/', base.length + 1)) {
         const name = folder.substring(base.length);
@@ -248,12 +236,6 @@ export class VFS {
   // Serialization for state management
   // ---------------------------------------------------------------------------
   serialize() {
-    // Convert files to plain objects (without blob data) because blobs can't be JSON serialized.
-    // We'll store only metadata and reference to blob? Better: store as array of file descriptors with blob as base64? Too heavy.
-    // For undo/redo, we'll handle differently: we'll store the whole file objects? Not possible.
-    // So for state snapshots, we'll store file paths and metadata, and assume blobs are in IndexedDB.
-    // We'll just store the list of paths and metadata, and the actual blob data is fetched from DB on restore.
-    // This is a design choice: we only store lightweight state.
     const filesData = [];
     for (const [path, file] of this.files) {
       filesData.push({
@@ -264,7 +246,6 @@ export class VFS {
         created: file.created,
         modified: file.modified,
         metadata: file.metadata || {},
-        // We do not store blob here; we'll fetch from DB on restore.
       });
     }
     return {
@@ -273,63 +254,34 @@ export class VFS {
     };
   }
 
+  /**
+   * Deserialize (restore) from a state object.
+   * For persistent mode, we reload from IndexedDB instead of trusting the in-memory blobs.
+   * So this method will trigger a reload from DB.
+   */
   deserialize(state) {
-    // Restore files from metadata; actual blobs are in IndexedDB.
-    // We need to reload from DB fully.
-    // For undo/redo, we will reload from IndexedDB.
-    // So this method will be used to restore the file list and folders, but blobs must be reloaded from DB.
-    // Actually, for simplicity, we'll just re-initialize from DB entirely.
-    // But to support undo/redo of file additions/deletions, we can use the serialized state to update VFS.
-    // We'll implement a lighter version: we'll clear and then add files from state, but we need blobs.
-    // Since blobs are stored in IndexedDB, we can fetch them by path.
-    // So we'll iterate over state.files, and for each path, try to fetch blob from DB.
-    // If not found, we'll create an empty blob (but that's not ideal).
-    // Alternative: during undo/redo, we save the whole VFS state to IndexedDB as a snapshot? Too heavy.
-    // For now, we'll implement a hybrid: during undo/redo, we will reload the entire VFS from IndexedDB.
-    // That's simpler and works because IndexedDB is persistent.
-    // So this deserialize will just update the in-memory map and folders, and then we'll need to ensure blobs are loaded.
-    // We'll call a method to reload blobs from DB.
-    // For simplicity, we'll just clear and reload from DB.
-    // But we also want to handle non-persisted mode (in-memory only). In that case, blobs are in memory.
-    // So we need two modes.
-    // Given the complexity, we'll implement deserialize to assume blobs are in memory (for in-memory mode) and for persisted mode, we'll reload from DB.
-    // We'll add a flag.
-    // For now, we'll implement a simple version: if persistence is on, we ignore deserialize and just reload from DB.
-    // If off, we expect blobs to be present in the state (we'll store them as base64? That's not feasible).
-    // So we'll only support persistence on for undo/redo.
-    // Thus we'll implement:
-    // - serialize: returns metadata only
-    // - deserialize: uses metadata to update file list, and will lazy-load blobs from DB when accessed.
-    // So we'll store the file list as metadata, and when a file is requested, we fetch blob from DB.
-    // This works because DB is persistent.
-    // So we'll have a cache: files map stores file objects with blob only if loaded; otherwise null and we fetch on demand.
-    // But for simplicity, we'll just reload everything from DB on deserialize.
-    // Let's do: clear current files and folders, then reload from DB.
-    // This is simple and works.
-    // So deserialize will just trigger a reload from DB.
-    // We'll call this method after undo/redo to refresh VFS.
-    // Actually, we don't even need deserialize if we reload from DB.
-    // But we need to update currentFolder, openTabs, etc., which are not in VFS.
-    // We'll just keep VFS as a separate module, and the App will manage workspace state.
-    // So for undo/redo, we'll store the entire workspace state (including VFS metadata) and restore by reloading from DB.
-    // That means after undo/redo, we call VFS.reloadFromDB().
-    // So we'll add a reloadFromDB method.
-    // We'll keep deserialize for in-memory mode only (not implemented).
-    // Let's implement reloadFromDB().
-    // So we'll add:
-    async reloadFromDB() {
-      if (this.persistence) {
-        this.files.clear();
-        this.folders = new Set(['/']);
-        await this.loadFromDB();
-      } else {
-        // In-memory, we can't reload; we'll need to store blobs in serialized state.
-        // For now, we'll not support undo/redo in non-persistent mode.
-        console.warn('Undo/redo not fully supported without persistence.');
-      }
+    // In persistent mode, we simply reload from IndexedDB.
+    // In non-persistent mode, we would need to restore blobs from state, which is not supported.
+    // For simplicity, we just call reloadFromDB().
+    if (this.persistence) {
+      this.reloadFromDB();
+    } else {
+      console.warn('Deserialize without persistence not fully implemented.');
     }
+  }
 
-    // We'll use the reloadFromDB method in App after undo/redo.
+  /**
+   * Reload all file data from IndexedDB, discarding current in-memory state.
+   * Used after undo/redo to restore a consistent state.
+   */
+  async reloadFromDB() {
+    if (this.persistence) {
+      this.files.clear();
+      this.folders = new Set(['/']);
+      await this.loadFromDB();
+    } else {
+      console.warn('Undo/redo not fully supported without persistence.');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -353,18 +305,15 @@ export class VFS {
   }
 
   // ---------------------------------------------------------------------------
-  // Internal
+  // Internal change notification
   // ---------------------------------------------------------------------------
   _emitChange() {
-    // We can use a global event bus if injected, but we'll just use a custom event.
-    // App will listen to this via event bus? We'll implement a simple observer pattern.
-    if (this._changeListeners) {
-      this._changeListeners.forEach(fn => fn());
+    for (const fn of this._changeListeners) {
+      try { fn(); } catch (e) {}
     }
   }
 
   onChange(callback) {
-    if (!this._changeListeners) this._changeListeners = [];
     this._changeListeners.push(callback);
     return () => {
       const idx = this._changeListeners.indexOf(callback);
