@@ -23,6 +23,7 @@ export class UIManager {
       dropZone: null,
       settingsContainer: null,
       mainArea: null,
+      inspectorContent: null,
     };
 
     this.isSidebarVisible = true;
@@ -117,7 +118,7 @@ export class UIManager {
 
     header.appendChild(left);
 
-    // Right: search container, ram meter, theme toggle
+    // Right: search container, ram meter, theme toggle, settings
     const right = document.createElement('div');
     right.style.display = 'flex';
     right.style.alignItems = 'center';
@@ -153,7 +154,6 @@ export class UIManager {
     themeBtn.style.fontSize = '18px';
     themeBtn.title = 'Toggle theme';
     themeBtn.addEventListener('click', () => {
-      // Will be handled by App via event
       document.dispatchEvent(new CustomEvent('nexus:toggle-theme'));
     });
     right.appendChild(themeBtn);
@@ -203,7 +203,6 @@ export class UIManager {
       <p style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">Drop Target: ZIP, Media, Binaries</p>
     `;
     dropZone.addEventListener('click', () => {
-      // Trigger file input
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
@@ -288,7 +287,7 @@ export class UIManager {
     editorHeader.textContent = 'Awaiting File Selection...';
     mainArea.appendChild(editorHeader);
 
-    // Editor surface
+    // Editor surface (where plugins render)
     const editorSurface = document.createElement('div');
     editorSurface.id = 'editor-surface';
     editorSurface.style.flex = '1';
@@ -416,7 +415,7 @@ export class UIManager {
   // Drop zone setup (global drag-and-drop)
   // ---------------------------------------------------------------------------
   _setupDropZone() {
-    // Global drag over/ drop
+    // Global drag over / drop
     document.addEventListener('dragover', (e) => {
       e.preventDefault();
       const dz = this.elements.dropZone;
@@ -465,10 +464,12 @@ export class UIManager {
   }
 
   getEditorHeader() {
-    return this.elements.header.querySelector('#editor-header') || document.getElementById('editor-header');
+    return document.getElementById('editor-header');
   }
 
-  // Update RAM meter
+  // ---------------------------------------------------------------------------
+  // UI updates
+  // ---------------------------------------------------------------------------
   updateRAMMeter(bytes) {
     const el = document.getElementById('ram-meter');
     if (el) {
@@ -477,7 +478,6 @@ export class UIManager {
     }
   }
 
-  // Show/hide sidebar
   toggleSidebar() {
     this.isSidebarVisible = !this.isSidebarVisible;
     this.elements.sidebar.style.display = this.isSidebarVisible ? 'flex' : 'none';
@@ -488,7 +488,6 @@ export class UIManager {
     this.elements.inspectorContainer.style.display = this.isInspectorVisible ? 'flex' : 'none';
   }
 
-  // Show settings panel
   showSettings() {
     const overlay = this.elements.settingsContainer;
     if (overlay) overlay.style.display = 'flex';
@@ -499,7 +498,6 @@ export class UIManager {
     if (overlay) overlay.style.display = 'none';
   }
 
-  // Set editor surface (clear it)
   setEditorContent(html) {
     const surface = this.elements.editorSurface;
     if (surface) surface.innerHTML = html;
@@ -510,7 +508,6 @@ export class UIManager {
     if (header) header.textContent = text;
   }
 
-  // Clear editor to idle state
   clearEditor() {
     this.setEditorContent(`
       <div style="text-align:center;opacity:0.2;pointer-events:none;">
