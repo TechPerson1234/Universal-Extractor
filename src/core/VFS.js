@@ -1,9 +1,11 @@
 // =============================================================================
-// src/core/VFS.js (CORRECTED)
+// src/core/VFS.js
 // =============================================================================
 // Virtual File System with IndexedDB persistence, file/folder operations,
 // search, and metadata management.
 // =============================================================================
+
+import { calculateChecksum } from '../utils/helpers.js';
 
 // Helper to get file type from name
 function getFileType(filename) {
@@ -260,9 +262,6 @@ export class VFS {
    * So this method will trigger a reload from DB.
    */
   deserialize(state) {
-    // In persistent mode, we simply reload from IndexedDB.
-    // In non-persistent mode, we would need to restore blobs from state, which is not supported.
-    // For simplicity, we just call reloadFromDB().
     if (this.persistence) {
       this.reloadFromDB();
     } else {
@@ -282,6 +281,20 @@ export class VFS {
     } else {
       console.warn('Undo/redo not fully supported without persistence.');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Checksum
+  // ---------------------------------------------------------------------------
+  /**
+   * Calculate SHA-256 checksum of a file by its path
+   * @param {string} path - File path
+   * @returns {Promise<string|null>} Checksum hex string or null if file not found
+   */
+  async calculateChecksum(path) {
+    const file = this.getFile(path);
+    if (!file) return null;
+    return calculateChecksum(file.blob);
   }
 
   // ---------------------------------------------------------------------------
