@@ -1,5 +1,5 @@
 // =============================================================================
-// src/ui/SettingsPanel.js
+// src/ui/SettingsPanel.js (CORRECTED)
 // =============================================================================
 // Full settings UI with categories, controls, import/export, and reset.
 // =============================================================================
@@ -91,6 +91,9 @@ export class SettingsPanel {
     ];
   }
 
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   _render() {
     const container = this.container;
     container.innerHTML = '';
@@ -153,6 +156,9 @@ export class SettingsPanel {
 
     // Render the first category
     this._renderCategory(container, activeCategory);
+
+    // Bind events for export/import/reset buttons
+    this._bindEvents();
   }
 
   _renderCategory(container, categoryId) {
@@ -337,7 +343,9 @@ export class SettingsPanel {
     this.onSettingsChanged(this.settings);
   }
 
-  // Bind events for export/import/reset after render
+  // ---------------------------------------------------------------------------
+  // Bind events for export/import/reset buttons
+  // ---------------------------------------------------------------------------
   _bindEvents() {
     const exportBtn = document.getElementById('settings-export');
     if (exportBtn) exportBtn.addEventListener('click', () => this._exportSettings());
@@ -345,11 +353,5 @@ export class SettingsPanel {
     if (importBtn) importBtn.addEventListener('click', () => this._importSettings());
     const resetBtn = document.getElementById('settings-reset');
     if (resetBtn) resetBtn.addEventListener('click', () => this._resetSettings());
-  }
-
-  // Override _render to call _bindEvents after rendering
-  _render() {
-    super._render();
-    this._bindEvents();
   }
 }
