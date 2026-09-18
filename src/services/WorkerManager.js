@@ -1,326 +1,523 @@
-// =============================================================================
-// src/services/WorkerManager.js
-// =============================================================================
-// Manages a pool of Web Workers for CPU-heavy tasks (image processing,
-// audio analysis, checksum calculation, archive extraction).
-// Workers are created as inline Blob URLs.
-// =============================================================================
+const DEFAULT_MAX_WORKERS = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
+const TASK_TIMEOUT = 120000;
+
+const WORKER_CODE = `
+"use strict";
+
+const handlers = {
+  'hash': async function(data) {
+    const { buffer, algorithm } = data;
+    const hashBuf = await crypto.subtle.digest(algorithm || 'SHA-256', buffer);
+    const arr = new Uint8Array(hashBuf);
+    let s = '';
+    for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0');
+    return { hash: s, algorithm: algorithm || 'SHA-256' };
+  },
+
+  'hash-stream': async function(data) {
+    const { chunks, algorithm } = data;
+    let total = 0;
+    for (const c of chunks) total += c.byteLength;
+    const combined = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      combined.set(new Uint8Array(c), off);
+      off += c.byteLength;
+    }
+    const hashBuf = await crypto.subtle.digest(algorithm || 'SHA-256', combined.buffer);
+    const arr = new Uint8Array(hashBuf);
+    let s = '';
+    for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0');
+    return { hash: s };
+  },
+
+  'image-filter': function(data) {
+    const { imageData, filter, amount } = data;
+    const { width, height, data: pixels } = imageData;
+    const out = new Uint8ClampedArray(pixels.length);
+    const src = new Uint8ClampedArray(pixels);
+    switch (filter) {
+      case 'invert':
+        for (let i = 0; i < src.length; i += 4) {
+          out[i] = 255 - src[i];
+          out[i+1] = 255 - src[i+1];
+          out[i+2] = 255 - src[i+2];
+          out[i+3] = src[i+3];
+        }
+        break;
+      case 'grayscale':
+        for (let i = 0; i < src.length; i += 4) {
+          const g = src[i] * 0.299 + src[i+1] * 0.587 + src[i+2] * 0.114;
+          out[i] = out[i+1] = out[i+2] = g;
+          out[i+3] = src[i+3];
+        }
+        break;
+      case 'sepia':
+        for (let i = 0; i < src.length; i += 4) {
+          out[i] = Math.min(255, src[i] * 0.393 + src[i+1] * 0.769 + src[i+2] * 0.189);
+          out[i+1] = Math.min(255, src[i] * 0.349 + src[i+1] * 0.686 + src[i+2] * 0.168);
+          out[i+2] = Math.min(255, src[i] * 0.272 + src[i+1] * 0.534 + src[i+2] * 0.131);
+          out[i+3] = src[i+3];
+        }
+        break;
+      case 'brightness':
+        for (let i = 0; i < src.length; i += 4) {
+          out[i] = Math.max(0, Math.min(255, src[i] + amount));
+          out[i+1] = Math.max(0, Math.min(255, src[i+1] + amount));
+          out[i+2] = Math.max(0, Math.min(255, src[i+2] + amount));
+          out[i+3] = src[i+3];
+        }
+        break;
+      case 'contrast': {
+        const f = (259 * (amount + 255)) / (255 * (259 - amount));
+        for (let i = 0; i < src.length; i += 4) {
+          out[i] = Math.max(0, Math.min(255, f * (src[i] - 128) + 128));
+          out[i+1] = Math.max(0, Math.min(255, f * (src[i+1] - 128) + 128));
+          out[i+2] = Math.max(0, Math.min(255, f * (src[i+2] - 128) + 128));
+          out[i+3] = src[i+3];
+        }
+        break;
+      }
+      case 'blur': {
+        const radius = Math.max(1, Math.floor(amount || 2));
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let r = 0, g = 0, b = 0, a = 0, count = 0;
+            for (let dy = -radius; dy <= radius; dy++) {
+              for (let dx = -radius; dx <= radius; dx++) {
+                const ny = y + dy, nx = x + dx;
+                if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+                const idx = (ny * width + nx) * 4;
+                r += src[idx]; g += src[idx+1]; b += src[idx+2]; a += src[idx+3];
+                count++;
+              }
+            }
+            const idx = (y * width + x) * 4;
+            out[idx] = r / count;
+            out[idx+1] = g / count;
+            out[idx+2] = b / count;
+            out[idx+3] = a / count;
+          }
+        }
+        break;
+      }
+      case 'sharpen': {
+        const kernel = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            let r = 0, g = 0, b = 0;
+            for (let ky = 0; ky < 3; ky++) {
+              for (let kx = 0; kx < 3; kx++) {
+                const ny = y + ky - 1, nx = x + kx - 1;
+                const k = kernel[ky * 3 + kx];
+                if (ny < 0 || ny >= height || nx < 0 || nx >= width) continue;
+                const idx = (ny * width + nx) * 4;
+                r += src[idx] * k;
+                g += src[idx+1] * k;
+                b += src[idx+2] * k;
+              }
+            }
+            const idx = (y * width + x) * 4;
+            out[idx] = Math.max(0, Math.min(255, r));
+            out[idx+1] = Math.max(0, Math.min(255, g));
+            out[idx+2] = Math.max(0, Math.min(255, b));
+            out[idx+3] = src[idx+3];
+          }
+        }
+        break;
+      }
+      default:
+        out.set(src);
+    }
+    return { data: out.buffer, width, height };
+  },
+
+  'image-resize': function(data) {
+    const { source, srcW, srcH, dstW, dstH } = data;
+    const src = new Uint8ClampedArray(source);
+    const out = new Uint8ClampedArray(dstW * dstH * 4);
+    const xRatio = srcW / dstW;
+    const yRatio = srcH / dstH;
+    for (let y = 0; y < dstH; y++) {
+      const sy = Math.min(srcH - 1, Math.floor(y * yRatio));
+      for (let x = 0; x < dstW; x++) {
+        const sx = Math.min(srcW - 1, Math.floor(x * xRatio));
+        const srcIdx = (sy * srcW + sx) * 4;
+        const dstIdx = (y * dstW + x) * 4;
+        out[dstIdx] = src[srcIdx];
+        out[dstIdx+1] = src[srcIdx+1];
+        out[dstIdx+2] = src[srcIdx+2];
+        out[dstIdx+3] = src[srcIdx+3];
+      }
+    }
+    return { data: out.buffer, width: dstW, height: dstH };
+  },
+
+  'audio-fft': function(data) {
+    const { samples, fftSize } = data;
+    const N = fftSize || 1024;
+    const re = new Float32Array(N);
+    const im = new Float32Array(N);
+    const src = new Float32Array(samples);
+    for (let i = 0; i < N && i < src.length; i++) re[i] = src[i];
+    fft(re, im);
+    const mag = new Float32Array(N / 2);
+    for (let i = 0; i < N / 2; i++) mag[i] = Math.sqrt(re[i]*re[i] + im[i]*im[i]);
+    return { magnitudes: mag.buffer };
+  },
+
+  'audio-peaks': function(data) {
+    const { samples, buckets } = data;
+    const src = new Float32Array(samples);
+    const count = buckets || 512;
+    const blockSize = Math.max(1, Math.floor(src.length / count));
+    const peaks = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      let max = 0;
+      const start = i * blockSize;
+      const end = Math.min(start + blockSize, src.length);
+      for (let j = start; j < end; j++) {
+        const v = Math.abs(src[j]);
+        if (v > max) max = v;
+      }
+      peaks[i] = max;
+    }
+    return { peaks: peaks.buffer };
+  },
+
+  'archive-list': function(data) {
+    return { message: 'archive-list not implemented' };
+  },
+
+  'text-lines': function(data) {
+    const { text } = data;
+    const lines = text.split('\\n');
+    return { lineCount: lines.length, charCount: text.length };
+  },
+
+  'text-wordcount': function(data) {
+    const { text } = data;
+    const words = text.trim() ? text.trim().split(/\\s+/).length : 0;
+    return { words };
+  },
+};
+
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wRe = Math.cos(ang);
+    const wIm = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let j = 0; j < len / 2; j++) {
+        const uRe = re[i + j];
+        const uIm = im[i + j];
+        const vRe = re[i + j + len / 2] * curRe - im[i + j + len / 2] * curIm;
+        const vIm = re[i + j + len / 2] * curIm + im[i + j + len / 2] * curRe;
+        re[i + j] = uRe + vRe;
+        im[i + j] = uIm + vIm;
+        re[i + j + len / 2] = uRe - vRe;
+        im[i + j + len / 2] = uIm - vIm;
+        const newRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = newRe;
+      }
+    }
+  }
+}
+
+self.onmessage = async function(e) {
+  const { taskId, operation, data } = e.data;
+  try {
+    const handler = handlers[operation];
+    if (!handler) throw new Error('Unknown operation: ' + operation);
+    const result = await handler(data);
+    const transfers = [];
+    if (result) {
+      for (const key of Object.keys(result)) {
+        if (result[key] instanceof ArrayBuffer) transfers.push(result[key]);
+      }
+    }
+    self.postMessage({ taskId, result }, transfers);
+  } catch (err) {
+    self.postMessage({ taskId, error: err.message || String(err) });
+  }
+};
+`;
 
 export class WorkerManager {
   constructor(options = {}) {
-    this.maxWorkers = options.maxWorkers || 4;
+    this.maxWorkers = options.maxWorkers || DEFAULT_MAX_WORKERS;
+    this.timeout = options.timeout || TASK_TIMEOUT;
+    this.workerUrl = null;
     this.workers = [];
-    this.taskQueue = [];
-    this.activeTasks = 0;
-    this.workerScripts = this._createWorkerScripts();
-    this.workerURLs = {};
-    this.pendingResolvers = new Map(); // taskId -> { resolve, reject }
     this.taskCounter = 0;
-
-    // Pre-create workers
-    for (let i = 0; i < this.maxWorkers; i++) {
-      this._createWorker();
-    }
+    this.pending = new Map();
+    this.queue = [];
+    this.activeByOperation = new Map();
+    this._stats = {
+      tasksCompleted: 0,
+      tasksFailed: 0,
+      tasksQueued: 0,
+      totalRuntime: 0,
+      peakQueue: 0,
+    };
+    this._listeners = new Set();
+    this._initialized = false;
   }
 
-  /**
-   * Run a task on a worker
-   * @param {string} workerType - 'image', 'audio', 'hash', 'archive'
-   * @param {string} operation - e.g., 'filter', 'analyze', 'checksum', 'extract'
-   * @param {*} data - Input data (will be transferred)
-   * @param {Array} transfer - List of transferable objects
-   * @returns {Promise<any>}
-   */
-  runTask(workerType, operation, data, transfer = []) {
+  async init() {
+    if (this._initialized) return;
+    const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
+    this.workerUrl = URL.createObjectURL(blob);
+    this._initialized = true;
+  }
+
+  _createWorker() {
+    const worker = new Worker(this.workerUrl);
+    const entry = { worker, busy: false, currentTask: null, id: this.workers.length };
+    worker.onmessage = (e) => this._handleMessage(entry, e);
+    worker.onerror = (e) => this._handleError(entry, e);
+    this.workers.push(entry);
+    return entry;
+  }
+
+  _handleMessage(entry, event) {
+    const { taskId, result, error } = event.data;
+    const task = this.pending.get(taskId);
+    if (!task) return;
+    this.pending.delete(taskId);
+    entry.busy = false;
+    entry.currentTask = null;
+    const runtime = performance.now() - task.startTime;
+    this._stats.totalRuntime += runtime;
+    if (error) {
+      this._stats.tasksFailed++;
+      task.reject(new Error(error));
+    } else {
+      this._stats.tasksCompleted++;
+      task.resolve(result);
+    }
+    this._notify('taskComplete', { taskId, runtime, error: !!error });
+    this._processQueue();
+  }
+
+  _handleError(entry, event) {
+    console.error('[WorkerManager] worker error', event);
+    const task = entry.currentTask;
+    if (task) {
+      const pending = this.pending.get(task);
+      if (pending) {
+        pending.reject(new Error('Worker crashed: ' + (event.message || 'unknown')));
+        this.pending.delete(task);
+      }
+    }
+    entry.busy = false;
+    entry.currentTask = null;
+    try { entry.worker.terminate(); } catch {}
+    const idx = this.workers.indexOf(entry);
+    if (idx !== -1) this.workers.splice(idx, 1);
+    if (this.workers.length < this.maxWorkers) this._createWorker();
+    this._processQueue();
+  }
+
+  async run(operation, data, transfer = []) {
+    await this.init();
     return new Promise((resolve, reject) => {
       const taskId = ++this.taskCounter;
-      this.taskQueue.push({ taskId, workerType, operation, data, transfer, resolve, reject });
+      const task = {
+        id: taskId,
+        operation,
+        data,
+        transfer,
+        resolve,
+        reject,
+        startTime: performance.now(),
+      };
+      this.pending.set(taskId, task);
+      this.queue.push(taskId);
+      this._stats.tasksQueued++;
+      if (this.queue.length > this._stats.peakQueue) {
+        this._stats.peakQueue = this.queue.length;
+      }
+      this._notify('taskQueued', { taskId, operation, queueLength: this.queue.length });
       this._processQueue();
     });
   }
 
-  /**
-   * Process the queue, assigning tasks to available workers
-   */
   _processQueue() {
-    if (this.taskQueue.length === 0) return;
-    // Find an idle worker
-    const idleWorker = this.workers.find(w => w.busy === false);
-    if (!idleWorker) {
-      // No workers available, wait
-      return;
+    if (!this.queue.length) return;
+    let idle = this.workers.find(w => !w.busy);
+    if (!idle && this.workers.length < this.maxWorkers) {
+      idle = this._createWorker();
     }
-    const task = this.taskQueue.shift();
-    this._assignTask(idleWorker, task);
-  }
-
-  _assignTask(worker, task) {
-    worker.busy = true;
-    this.activeTasks++;
-
-    const { taskId, workerType, operation, data, transfer, resolve, reject } = task;
-
-    // Store resolver
-    this.pendingResolvers.set(taskId, { resolve, reject });
-
-    // Ensure worker is initialized with the right script
-    const scriptUrl = this.workerURLs[workerType];
-    if (!scriptUrl) {
-      reject(new Error(`No worker script for type: ${workerType}`));
-      worker.busy = false;
-      this.activeTasks--;
-      this._processQueue();
-      return;
-    }
-
-    // If worker's URL is different, terminate and recreate
-    if (worker.worker && worker.worker.scriptUrl !== scriptUrl) {
-      worker.worker.terminate();
-      worker.worker = new Worker(scriptUrl);
-      worker.worker.scriptUrl = scriptUrl;
-      // Set up message handler
-      this._setupWorkerHandlers(worker);
-    }
-
-    // Post message
+    if (!idle) return;
+    const taskId = this.queue.shift();
+    const task = this.pending.get(taskId);
+    if (!task) return;
+    idle.busy = true;
+    idle.currentTask = taskId;
+    task.startTime = performance.now();
+    this._notify('taskStarted', { taskId, operation: task.operation, workerId: idle.id });
     try {
-      worker.worker.postMessage({ taskId, operation, data }, transfer);
+      idle.worker.postMessage(
+        { taskId, operation: task.operation, data: task.data },
+        task.transfer
+      );
+      setTimeout(() => {
+        if (this.pending.has(taskId)) {
+          this.pending.delete(taskId);
+          idle.busy = false;
+          idle.currentTask = null;
+          this._stats.tasksFailed++;
+          task.reject(new Error('Task timeout'));
+          this._processQueue();
+        }
+      }, this.timeout);
     } catch (err) {
-      reject(err);
-      worker.busy = false;
-      this.activeTasks--;
-      this.pendingResolvers.delete(taskId);
+      idle.busy = false;
+      idle.currentTask = null;
+      this.pending.delete(taskId);
+      this._stats.tasksFailed++;
+      task.reject(err);
       this._processQueue();
     }
   }
 
-  _setupWorkerHandlers(worker) {
-    worker.worker.onmessage = (e) => {
-      const { taskId, result, error } = e.data;
-      const resolver = this.pendingResolvers.get(taskId);
-      if (resolver) {
-        if (error) {
-          resolver.reject(new Error(error));
-        } else {
-          resolver.resolve(result);
-        }
-        this.pendingResolvers.delete(taskId);
+  async computeHash(buffer, algorithm = 'SHA-256') {
+    return this.run('hash', { buffer, algorithm }, [buffer]);
+  }
+
+  async computeStreamingHash(chunks, algorithm = 'SHA-256') {
+    const transfer = chunks.filter(c => c instanceof ArrayBuffer);
+    return this.run('hash-stream', { chunks, algorithm }, transfer);
+  }
+
+  async applyImageFilter(imageData, filter, amount = 0) {
+    const buffer = imageData.data.buffer;
+    const result = await this.run(
+      'image-filter',
+      {
+        imageData: {
+          width: imageData.width,
+          height: imageData.height,
+          data: buffer,
+        },
+        filter,
+        amount,
+      },
+      [buffer]
+    );
+    return {
+      width: result.width,
+      height: result.height,
+      data: new Uint8ClampedArray(result.data),
+    };
+  }
+
+  async resizeImage(source, srcW, srcH, dstW, dstH) {
+    const buffer = source.buffer || source;
+    const result = await this.run(
+      'image-resize',
+      { source: buffer, srcW, srcH, dstW, dstH },
+      [buffer]
+    );
+    return {
+      width: result.width,
+      height: result.height,
+      data: new Uint8ClampedArray(result.data),
+    };
+  }
+
+  async computeFFT(samples, fftSize = 1024) {
+    const buffer = samples.buffer || samples;
+    const result = await this.run('audio-fft', { samples: buffer, fftSize }, [buffer]);
+    return new Float32Array(result.magnitudes);
+  }
+
+  async computeAudioPeaks(samples, buckets = 512) {
+    const buffer = samples.buffer || samples;
+    const result = await this.run('audio-peaks', { samples: buffer, buckets }, [buffer]);
+    return new Float32Array(result.peaks);
+  }
+
+  async countLines(text) {
+    return this.run('text-lines', { text });
+  }
+
+  async countWords(text) {
+    return this.run('text-wordcount', { text });
+  }
+
+  getStats() {
+    const busy = this.workers.filter(w => w.busy).length;
+    return {
+      ...this._stats,
+      workers: this.workers.length,
+      busyWorkers: busy,
+      idleWorkers: this.workers.length - busy,
+      queueLength: this.queue.length,
+      pendingTasks: this.pending.size,
+      avgRuntime: this._stats.tasksCompleted > 0
+        ? this._stats.totalRuntime / this._stats.tasksCompleted
+        : 0,
+    };
+  }
+
+  subscribe(fn) {
+    this._listeners.add(fn);
+    return () => this._listeners.delete(fn);
+  }
+
+  _notify(type, payload) {
+    for (const fn of this._listeners) {
+      try { fn({ type, ...payload, ts: Date.now() }); } catch {}
+    }
+  }
+
+  async warmup() {
+    await this.init();
+    if (this.workers.length === 0) this._createWorker();
+    return this.workers.length;
+  }
+
+  clearQueue() {
+    const removed = this.queue.length;
+    for (const taskId of this.queue) {
+      const task = this.pending.get(taskId);
+      if (task) {
+        task.reject(new Error('Task cancelled'));
+        this.pending.delete(taskId);
       }
-      worker.busy = false;
-      this.activeTasks--;
-      // Process next task
-      this._processQueue();
-    };
-    worker.worker.onerror = (err) => {
-      // If error, we need to reject the current task
-      // But we don't know which task; we'll reject all pending? Better to handle in message.
-      console.error('Worker error:', err);
-      // We'll try to restart the worker
-      worker.busy = false;
-      this.activeTasks--;
-      this._processQueue();
-    };
+    }
+    this.queue = [];
+    return removed;
   }
 
-  _createWorker() {
-    // We'll create a basic worker that can load different scripts
-    // But to simplify, we create workers with a dynamic script loader.
-    // We'll define a "master" worker that can evaluate code on the fly.
-    // For better isolation, we'll create separate workers per type on demand.
-    // Since we want a pool, we'll pre-create workers and assign them to types.
-    // But we can also create workers on demand with specific scripts.
-    // For simplicity, we'll create a generic worker that can handle any task
-    // by sending the script code along with the task.
-    // Actually, we'll create separate workers per type, but we'll limit total workers.
-    // Since we have a pool, we can assign a worker to a type when needed.
-    // We'll create workers only when needed (lazy).
-    // For now, we'll create a pool of generic workers that can be assigned to any type.
-    // We'll implement a simple worker that can dynamically import a script.
-    // Alternative: use a single worker script that handles all types via switch.
-    // Let's build a worker that receives a function as a string and executes it.
-    // We'll generate the worker script inline.
-
-    const workerCode = `
-      // Worker that can execute functions sent as strings
-      self.onmessage = async function(e) {
-        const { taskId, operation, data, code } = e.data;
-        try {
-          // If code is provided, we can use it
-          // But we'll use operation to determine behavior
-          let result;
-          switch(operation) {
-            case 'invert':
-            case 'sepia':
-            case 'blur':
-            case 'sharpen':
-            case 'noise':
-              // Image filter - we need to process image data
-              // We'll assume data is an ImageData or raw pixels
-              result = await self.imageFilter(operation, data);
-              break;
-            case 'analyze':
-              // Audio analysis
-              result = await self.audioAnalyze(data);
-              break;
-            case 'checksum':
-              result = await self.checksum(data);
-              break;
-            case 'extract':
-              result = await self.extractArchive(data);
-              break;
-            default:
-              throw new Error('Unknown operation: ' + operation);
-          }
-          self.postMessage({ taskId, result });
-        } catch(err) {
-          self.postMessage({ taskId, error: err.message });
-        }
-      };
-
-      // Image filters (simplified)
-      self.imageFilter = function(operation, imageData) {
-        // imageData is an object with { width, height, data: Uint8ClampedArray }
-        const data = imageData.data;
-        const len = data.length;
-        let result = new Uint8ClampedArray(data);
-        switch(operation) {
-          case 'invert':
-            for (let i = 0; i < len; i += 4) {
-              result[i] = 255 - data[i];
-              result[i+1] = 255 - data[i+1];
-              result[i+2] = 255 - data[i+2];
-              // alpha unchanged
-            }
-            break;
-          case 'sepia':
-            for (let i = 0; i < len; i += 4) {
-              const r = data[i];
-              const g = data[i+1];
-              const b = data[i+2];
-              result[i] = Math.min(255, r * 0.393 + g * 0.769 + b * 0.189);
-              result[i+1] = Math.min(255, r * 0.349 + g * 0.686 + b * 0.168);
-              result[i+2] = Math.min(255, r * 0.272 + g * 0.534 + b * 0.131);
-            }
-            break;
-          case 'noise':
-            for (let i = 0; i < len; i += 4) {
-              const noise = (Math.random() - 0.5) * 50;
-              result[i] = Math.min(255, Math.max(0, data[i] + noise));
-              result[i+1] = Math.min(255, Math.max(0, data[i+1] + noise));
-              result[i+2] = Math.min(255, Math.max(0, data[i+2] + noise));
-            }
-            break;
-          case 'blur':
-            // Simple box blur (3x3) - naive implementation
-            // For performance, we'd do more efficient, but this is a demo.
-            // We'll use a simple average of neighbors.
-            const width = imageData.width;
-            const height = imageData.height;
-            const output = new Uint8ClampedArray(data);
-            for (let y = 1; y < height-1; y++) {
-              for (let x = 1; x < width-1; x++) {
-                let r = 0, g = 0, b = 0;
-                for (let dy = -1; dy <= 1; dy++) {
-                  for (let dx = -1; dx <= 1; dx++) {
-                    const idx = ((y + dy) * width + (x + dx)) * 4;
-                    r += data[idx];
-                    g += data[idx+1];
-                    b += data[idx+2];
-                  }
-                }
-                const idx = (y * width + x) * 4;
-                output[idx] = r / 9;
-                output[idx+1] = g / 9;
-                output[idx+2] = b / 9;
-              }
-            }
-            result = output;
-            break;
-          case 'sharpen':
-            // Simple sharpen kernel
-            const kernel = [0, -1, 0, -1, 5, -1, 0, -1, 0];
-            // Apply convolution
-            // We'll reuse blur approach but with kernel
-            const w = imageData.width;
-            const h = imageData.height;
-            const out = new Uint8ClampedArray(data);
-            for (let y = 1; y < h-1; y++) {
-              for (let x = 1; x < w-1; x++) {
-                let r = 0, g = 0, b = 0;
-                let idx = 0;
-                for (let dy = -1; dy <= 1; dy++) {
-                  for (let dx = -1; dx <= 1; dx++) {
-                    const srcIdx = ((y + dy) * w + (x + dx)) * 4;
-                    const k = kernel[idx++];
-                    r += data[srcIdx] * k;
-                    g += data[srcIdx+1] * k;
-                    b += data[srcIdx+2] * k;
-                  }
-                }
-                const dstIdx = (y * w + x) * 4;
-                out[dstIdx] = Math.min(255, Math.max(0, r));
-                out[dstIdx+1] = Math.min(255, Math.max(0, g));
-                out[dstIdx+2] = Math.min(255, Math.max(0, b));
-              }
-            }
-            result = out;
-            break;
-          default:
-            throw new Error('Unsupported image operation: ' + operation);
-        }
-        return { width: imageData.width, height: imageData.height, data: result };
-      };
-
-      // Audio analysis: compute FFT (simplified)
-      self.audioAnalyze = function(data) {
-        // data is an ArrayBuffer (raw PCM)
-        const buffer = new Float32Array(data);
-        // Simple FFT (we'll just return random freq for demo)
-        // In real implementation, we'd use a proper FFT library.
-        const freq = new Float32Array(128);
-        for (let i = 0; i < 128; i++) {
-          freq[i] = Math.random();
-        }
-        return freq;
-      };
-
-      // Checksum (SHA-256) – but we can't use crypto.subtle in worker? Actually we can.
-      self.checksum = async function(data) {
-        // data is ArrayBuffer
-        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-        const hashArray = new Uint8Array(hashBuffer);
-        return Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
-      };
-
-      // Archive extraction (simulated)
-      self.extractArchive = function(data) {
-        // Placeholder: for real extraction, we'd need JSZip or similar
-        // But we can't include it in the worker, so we'll just return placeholder
-        return { files: [], error: 'Archive extraction not implemented in worker' };
-      };
-    `;
-
-    // Create a Blob URL for this worker code
-    const blob = new Blob([workerCode], { type: 'application/javascript' });
-    const url = URL.createObjectURL(blob);
-    this.workerURLs['default'] = url;
-
-    // Create initial worker
-    const worker = new Worker(url);
-    worker.scriptUrl = url;
-    worker.busy = false;
-    this.workers.push({ worker, busy: false });
-  }
-
-  /**
-   * Terminate all workers
-   */
   terminateAll() {
-    for (const w of this.workers) {
-      w.worker.terminate();
+    for (const entry of this.workers) {
+      try { entry.worker.terminate(); } catch {}
     }
     this.workers = [];
-    this.taskQueue = [];
-    this.activeTasks = 0;
+    this.queue = [];
+    for (const task of this.pending.values()) {
+      task.reject(new Error('Worker terminated'));
+    }
+    this.pending.clear();
+    if (this.workerUrl) URL.revokeObjectURL(this.workerUrl);
+    this.workerUrl = null;
+    this._initialized = false;
   }
 }
+
+export const workerManager = new WorkerManager();
