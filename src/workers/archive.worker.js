@@ -446,4 +446,159 @@ const handlers = {
     const zip = ensureZipLib();
     const { chunks, filename } = data;
     const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), {
-      bufferedWrite:
+      bufferedWrite: true,
+      level: 6,
+    });
+    for (const chunk of chunks) {
+      await writer.add(chunk.name, new zip.BlobReader(new Blob([chunk.data])), {
+        onprogress: (p) => {
+          self.postMessage({
+            taskId: data.taskId,
+            progress: true,
+            value: p.percent / 100,
+            stage: 'zip-add',
+            detail: chunk.name,
+          });
+        },
+      });
+    }
+    const blob = await writer.close();
+    const buffer = await blob.arrayBuffer();
+    return { data: buffer, size: buffer.byteLength, filename: filename || 'archive.zip' };
+  },
+
+  async createZip(data) {
+    const zip = ensureZipLib();
+    const { files, options } = data;
+    const writer = new zip.ZipWriter(new zip.BlobWriter('application/zip'), {
+      bufferedWrite: true,
+      level: (options && options.level) || 6,
+    });
+    for (const file of files) {
+      await writer.add(file.name, new zip.BlobReader(file.blob || new Blob([file.data])), {
+        onprogress: (p) => {
+          self.postMessage({
+            taskId: data.taskId,
+            progress: true,
+            value: p.percent / 100,
+            stage: 'zip-add',
+            detail: file.name,
+          });
+        },
+      });
+    }
+    const blob = await writer.close();
+    return { blob };
+  },
+
+  async createTar(data) {
+    const { files } = data;
+    const blocks = [];
+    for (const file of files) {
+      const name = file.name;
+      const data = file.data instanceof ArrayBuffer ? new Uint8Array(file.data) : new Uint8Array(file.data);
+      const header = new Uint8Array(512);
+      const nameBytes = new TextEncoder().encode(name);
+      header.set(nameBytes.slice(0, 100), 0);
+
+      const mode = '0000644\0';
+      header.set(new TextEncoder().encode(mode), 100);
+
+      const uid = '0000000\0';
+      header.set(new TextEncoder().encode(uid), 108);
+      header.set(new TextEncoder().encode(uid), 116);
+
+      const sizeOctal = data.length.toString(8).padStart(11, '0') + '\0';
+      header.set(new TextEncoder().encode(sizeOctal), 124);
+
+      const mtime = Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + '\0';
+      header.set(new TextEncoder().encode(mtime), 136);
+
+      header[156] = 0x30;
+
+      let checksum = 0;
+      for (let i = 0; i < 512; i++) checksum += header[i];
+      const ckStr = checksum.toString(8).padStart(6, '0') + '\0 ';
+      header.set(new TextEncoder().encode(ckStr), 148);
+
+      blocks.push(header);
+      blocks.push(data);
+
+      const padding = (512 - (data.length % 512)) % 512;
+      if (padding > 0) blocks.push(new Uint8Array(padding));
+    }
+    blocks.push(new Uint8Array(1024));
+
+    let total = 0;
+    for (const b of blocks) total += b.length;
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const b of blocks) {
+      out.set(b, off);
+      off += b.length;
+    }
+    return { data: out.buffer, size: out.length };
+  },
+
+  async inspect(data) {
+    const { buffer } = data;
+    const bytes = new Uint8Array(buffer);
+    const format = detectFormat(bytes);
+    let info = { format, size: bytes.length };
+    try {
+      if (format === 'zip' || format === 'zip-empty') {
+        const central = await listZipContents(buffer);
+        info.entryCount = central.totalEntries;
+        info.comment = central.comment;
+        info.entries = central.entries.slice(0, 100).map((e) => ({
+          name: e.name,
+          size: e.uncompressedSize,
+          compressed: e.compressedSize,
+          directory: e.directory,
+        }));
+      } else if (format === 'tar') {
+        const entries = parseTar(buffer);
+        info.entryCount = entries.length;
+        info.entries = entries.slice(0, 100).map((e) => ({
+          name: e.name,
+          size: e.size,
+          type: e.type,
+        }));
+      } else if (format === 'gzip') {
+        const header = parseGzipHeader(bytes);
+        info.originalName = header.originalName;
+        info.mtime = header.mtime;
+      }
+    } catch (e) {
+      info.error = e.message;
+    }
+    return info;
+  },
+};
+
+self.onmessage = async function (e) {
+  const { taskId, operation, data } = e.data;
+  try {
+    const handler = handlers[operation];
+    if (!handler) throw new Error('Unknown operation: ' + operation);
+    if (data && !data.taskId) data.taskId = taskId;
+    const result = await handler(data || {});
+    const transfers = [];
+    if (result && typeof result === 'object') {
+      for (const key of Object.keys(result)) {
+        const v = result[key];
+        if (v instanceof ArrayBuffer) transfers.push(v);
+        if (Array.isArray(v)) {
+          for (const item of v) {
+            if (item && item.data instanceof ArrayBuffer) transfers.push(item.data);
+          }
+        }
+      }
+    }
+    self.postMessage({ taskId, result }, transfers);
+  } catch (err) {
+    self.postMessage({ taskId, error: err.message || String(err) });
+  }
+};
+
+self.postMessage({ type: 'ready', worker: 'archive' });
