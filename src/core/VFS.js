@@ -1,346 +1,858 @@
-// =============================================================================
-// src/core/VFS.js
-// =============================================================================
-// Virtual File System with IndexedDB persistence, file/folder operations,
-// search, and metadata management.
-// =============================================================================
+import { ChunkStore } from './ChunkStore.js';
 
-import { calculateChecksum } from '../utils/helpers.js';
+const SMALL_FILE_THRESHOLD = 8 * 1024 * 1024;
+const DEFAULT_CHUNK_SIZE = 1024 * 1024;
+const SEARCH_TOKEN_LIMIT = 64;
 
-// Helper to get file type from name
-function getFileType(filename) {
-  const ext = filename.split('.').pop()?.toLowerCase();
-  if (!ext) return 'BINARY';
-  if (['png','jpg','jpeg','webp','gif','bmp','svg'].includes(ext)) return 'IMAGE';
-  if (['mp4','webm','mov','avi','mkv'].includes(ext)) return 'VIDEO';
-  if (['mp3','wav','ogg','flac','aac'].includes(ext)) return 'AUDIO';
-  if (['txt','json','md','js','html','css','xml','yaml','yml','c','cpp','java','py','rb','go','rs','swift'].includes(ext)) return 'TEXT';
-  if (['obj','stl','gltf','glb'].includes(ext)) return 'MODEL';
-  if (['pdf'].includes(ext)) return 'PDF';
-  if (['zip','apk','jar','rar','7z','tar','gz'].includes(ext)) return 'ARCHIVE';
+const IMAGE_EXTS = ['png','jpg','jpeg','webp','gif','bmp','svg','ico','avif','tiff'];
+const VIDEO_EXTS = ['mp4','webm','mov','avi','mkv','flv','wmv','m4v','mpg','mpeg'];
+const AUDIO_EXTS = ['mp3','wav','ogg','flac','aac','m4a','opus','oga'];
+const TEXT_EXTS = ['txt','json','md','js','mjs','ts','html','htm','css','xml','yaml','yml','csv','log','c','cpp','h','hpp','java','py','rb','go','rs','swift','kt','php','sh','bat','ps1','ini','cfg','toml'];
+const MODEL_EXTS = ['obj','stl','gltf','glb','fbx','3ds','dae','ply'];
+const PDF_EXTS = ['pdf'];
+const ARCHIVE_EXTS = ['zip','apk','jar','rar','7z','tar','gz','bz2','xz','tgz','war'];
+
+export function getFileType(filename) {
+  const dot = filename.lastIndexOf('.');
+  if (dot === -1) return 'BINARY';
+  const ext = filename.slice(dot + 1).toLowerCase();
+  if (IMAGE_EXTS.includes(ext)) return 'IMAGE';
+  if (VIDEO_EXTS.includes(ext)) return 'VIDEO';
+  if (AUDIO_EXTS.includes(ext)) return 'AUDIO';
+  if (TEXT_EXTS.includes(ext)) return 'TEXT';
+  if (MODEL_EXTS.includes(ext)) return 'MODEL';
+  if (PDF_EXTS.includes(ext)) return 'PDF';
+  if (ARCHIVE_EXTS.includes(ext)) return 'ARCHIVE';
   return 'BINARY';
+}
+
+export function getMimeType(filename) {
+  const dot = filename.lastIndexOf('.');
+  if (dot === -1) return 'application/octet-stream';
+  const ext = filename.slice(dot + 1).toLowerCase();
+  const map = {
+    png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', webp:'image/webp',
+    gif:'image/gif', bmp:'image/bmp', svg:'image/svg+xml', ico:'image/x-icon',
+    avif:'image/avif', tiff:'image/tiff',
+    mp4:'video/mp4', webm:'video/webm', mov:'video/quicktime', avi:'video/x-msvideo',
+    mkv:'video/x-matroska', m4v:'video/x-m4v',
+    mp3:'audio/mpeg', wav:'audio/wav', ogg:'audio/ogg', flac:'audio/flac',
+    aac:'audio/aac', m4a:'audio/mp4', opus:'audio/opus',
+    txt:'text/plain', json:'application/json', md:'text/markdown',
+    js:'text/javascript', mjs:'text/javascript', ts:'text/typescript',
+    html:'text/html', htm:'text/html', css:'text/css', xml:'application/xml',
+    yaml:'text/yaml', yml:'text/yaml', csv:'text/csv', log:'text/plain',
+    pdf:'application/pdf',
+    zip:'application/zip', apk:'application/vnd.android.package-archive',
+    jar:'application/java-archive', rar:'application/vnd.rar',
+    '7z':'application/x-7z-compressed', tar:'application/x-tar',
+    gz:'application/gzip', tgz:'application/gzip',
+    obj:'text/plain', stl:'application/sla', gltf:'model/gltf+json',
+    glb:'model/gltf-binary', fbx:'application/octet-stream',
+  };
+  return map[ext] || 'application/octet-stream';
 }
 
 export class VFS {
   constructor(options = {}) {
+    this.chunkStore = options.chunkStore || new ChunkStore({
+      chunkSize: options.chunkSize || DEFAULT_CHUNK_SIZE,
+      dbName: options.chunkDbName || 'NexusChunks',
+      compress: options.compress !== false,
+    });
+    this.smallFileThreshold = options.smallFileThreshold || SMALL_FILE_THRESHOLD;
+    this.chunkSize = options.chunkSize || DEFAULT_CHUNK_SIZE;
     this.persistence = options.persistence !== false;
     this.dbName = options.dbName || 'NexusVFS';
-    this.storeName = 'files';
+    this.dbVersion = options.dbVersion || 1;
+    this.metaStore = 'metadata';
     this.db = null;
-    this.files = new Map(); // path -> file object { name, blob, type, size, created, modified, path, metadata }
+    this.ready = false;
+    this.files = new Map();
     this.folders = new Set(['/']);
-    this.initialized = false;
-    this._changeListeners = [];
+    this.tags = new Map();
+    this._changeListeners = new Set();
+    this._progressListeners = new Set();
+    this._searchIndex = new Map();
+    this._searchCache = null;
+    this._searchCacheDirty = true;
+    this._opQueue = Promise.resolve();
+    this._stats = {
+      ingested: 0, bytesIngested: 0, reads: 0, bytesRead: 0,
+      writes: 0, deletes: 0, moves: 0, copies: 0,
+    };
   }
 
-  // ---------------------------------------------------------------------------
-  // IndexedDB setup
-  // ---------------------------------------------------------------------------
-  async _openDB() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        if (!db.objectStoreNames.contains(this.storeName)) {
-          const store = db.createObjectStore(this.storeName, { keyPath: 'path' });
-          store.createIndex('name', 'name', { unique: false });
+  async init() {
+    if (this.ready) return;
+    await this.chunkStore.open();
+    if (this.persistence) await this._openMetaDB();
+    if (this.persistence) await this.loadFromDB();
+    this.ready = true;
+    this._emitChange('ready', {});
+  }
+
+  async _openMetaDB() {
+    if (this.db) return this.db;
+    this.db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open(this.dbName, this.dbVersion);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(this.metaStore)) {
+          const store = db.createObjectStore(this.metaStore, { keyPath: 'path' });
           store.createIndex('type', 'type', { unique: false });
+          store.createIndex('modified', 'modified', { unique: false });
         }
       };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
     });
+    return this.db;
   }
 
   async loadFromDB() {
     if (!this.persistence) return;
-    try {
-      this.db = await this._openDB();
-      const tx = this.db.transaction(this.storeName, 'readonly');
-      const store = tx.objectStore(this.storeName);
-      const all = await new Promise((resolve, reject) => {
-        const result = [];
-        const cursor = store.openCursor();
-        cursor.onsuccess = (e) => {
-          const cur = e.target.result;
-          if (cur) {
-            result.push(cur.value);
-            cur.continue();
-          } else {
-            resolve(result);
-          }
-        };
-        cursor.onerror = () => reject(cursor.error);
-      });
-      // Reconstruct files
-      for (const entry of all) {
-        let blob = entry.blob;
-        if (entry.blob && entry.blob instanceof ArrayBuffer) {
-          blob = new Blob([entry.blob], { type: entry.mimeType || 'application/octet-stream' });
-        }
-        const file = {
-          name: entry.name,
-          blob: blob,
-          type: entry.type || getFileType(entry.name),
-          size: entry.size || blob.size,
-          created: entry.created || Date.now(),
-          modified: entry.modified || Date.now(),
-          path: entry.path,
-          metadata: entry.metadata || {},
-        };
-        this.files.set(entry.path, file);
-        // Add folders
-        const parts = entry.path.split('/');
-        let current = '';
-        for (let i = 0; i < parts.length - 1; i++) {
-          current += (current ? '/' : '') + parts[i];
-          this.folders.add(current || '/');
-        }
+    await this._openMetaDB();
+    const all = await this._idbGetAll(this.metaStore);
+    for (const entry of all) {
+      this.files.set(entry.path, { ...entry });
+      this._indexPath(entry.path);
+      this._searchIndex.set(entry.path, this._tokenize(entry.path));
+      const parts = entry.path.split('/');
+      let cur = '';
+      for (let i = 0; i < parts.length - 1; i++) {
+        cur += (cur ? '/' : '') + parts[i];
+        this.folders.add(cur || '/');
       }
-      this.initialized = true;
-    } catch (e) {
-      console.warn('Failed to load VFS from IndexedDB:', e);
-      this.files.clear();
-      this.folders = new Set(['/']);
     }
+    for (const path of this.files.keys()) {
+      const meta = await this.chunkStore.readMeta(path);
+      if (meta && meta.chunkCount) {
+        const f = this.files.get(path);
+        if (f) f.chunkCount = meta.chunkCount;
+      }
+    }
+    this._emitChange('loaded', { count: this.files.size });
   }
 
   async saveToDB() {
-    if (!this.persistence || !this.db) return;
-    try {
-      const tx = this.db.transaction(this.storeName, 'readwrite');
-      const store = tx.objectStore(this.storeName);
-      store.clear();
-      for (const [path, file] of this.files) {
-        const entry = {
-          path: path,
-          name: file.name,
-          blob: file.blob,
-          type: file.type,
-          size: file.size,
-          created: file.created,
-          modified: file.modified,
-          mimeType: file.blob.type || 'application/octet-stream',
-          metadata: file.metadata || {},
-        };
-        store.put(entry);
+    if (!this.persistence) return;
+    await this._openMetaDB();
+    const tx = this.db.transaction(this.metaStore, 'readwrite');
+    const store = tx.objectStore(this.metaStore);
+    store.clear();
+    for (const [path, file] of this.files) {
+      store.put({ ...file, path });
+    }
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  _idbGetAll(storeName) {
+    return new Promise((resolve, reject) => {
+      const tx = this.db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async ingest(file, path) {
+    return this._enqueue(async () => {
+      if (!path) path = '/' + (file.name || `file_${Date.now()}`);
+      path = this._normalizePath(path);
+      const name = path.split('/').pop();
+      const type = getFileType(name);
+      const mimeType = file.type || getMimeType(name);
+      const size = file.size;
+
+      const meta = {
+        path,
+        name,
+        type,
+        mimeType,
+        size,
+        created: Date.now(),
+        modified: Date.now(),
+        chunkCount: 0,
+        checksum: null,
+        tags: [],
+        metadata: {},
+      };
+
+      if (size === 0) {
+        meta.chunkCount = 0;
+        this.files.set(path, meta);
+        this._indexPath(path);
+        await this._persistMeta(meta);
+        this._stats.ingested++;
+        this._emitChange('ingest', { path, size: 0 });
+        return meta;
       }
-      await new Promise((resolve, reject) => {
-        tx.oncomplete = resolve;
-        tx.onerror = reject;
+
+      const stream = file.stream();
+      const result = await this._writeStream(path, stream, {
+        totalSize: size,
+        chunkSize: this.chunkSize,
+        onProgress: (p) => this._emitProgress({ path, ...p }),
       });
-    } catch (e) {
-      console.warn('Failed to save VFS to IndexedDB:', e);
-    }
+
+      meta.chunkCount = result.chunkCount;
+      meta.checksum = result.checksum;
+      meta.size = result.totalSize;
+      this.files.set(path, meta);
+      this._indexPath(path);
+      this._searchIndex.set(path, this._tokenize(path));
+      await this._persistMeta(meta);
+      this._stats.ingested++;
+      this._stats.bytesIngested += size;
+      this._emitChange('ingest', { path, size });
+      return meta;
+    });
   }
 
-  // ---------------------------------------------------------------------------
-  // File operations
-  // ---------------------------------------------------------------------------
-  addFile(path, blob, type) {
-    const name = path.split('/').pop();
-    const file = {
-      name,
-      blob,
-      type: type || getFileType(name),
-      size: blob.size,
+  async ingestStream(stream, path, options = {}) {
+    return this._enqueue(async () => {
+      path = this._normalizePath(path);
+      const name = path.split('/').pop();
+      const result = await this._writeStream(path, stream, {
+        totalSize: options.totalSize || 0,
+        chunkSize: options.chunkSize || this.chunkSize,
+        onProgress: options.onProgress || ((p) => this._emitProgress({ path, ...p })),
+      });
+      const meta = {
+        path,
+        name,
+        type: getFileType(name),
+        mimeType: options.mimeType || getMimeType(name),
+        size: result.totalSize,
+        created: Date.now(),
+        modified: Date.now(),
+        chunkCount: result.chunkCount,
+        checksum: result.checksum,
+        tags: [],
+        metadata: options.metadata || {},
+      };
+      this.files.set(path, meta);
+      this._indexPath(path);
+      this._searchIndex.set(path, this._tokenize(path));
+      await this._persistMeta(meta);
+      this._stats.ingested++;
+      this._stats.bytesIngested += result.totalSize;
+      this._emitChange('ingest', { path, size: result.totalSize });
+      return meta;
+    });
+  }
+
+  async _writeStream(path, readable, options) {
+    const { chunkSize, totalSize, onProgress } = options;
+    const reader = readable.getReader();
+    let buffer = new Uint8Array(0);
+    let index = 0;
+    let total = 0;
+    const hashChunks = [];
+    const useHash = options.hash !== false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || !value.byteLength) continue;
+      if (useHash) hashChunks.push(value);
+      total += value.byteLength;
+      const combined = new Uint8Array(buffer.byteLength + value.byteLength);
+      combined.set(buffer);
+      combined.set(value, buffer.byteLength);
+      buffer = combined;
+      while (buffer.byteLength >= chunkSize) {
+        const slice = buffer.slice(0, chunkSize);
+        await this.chunkStore.writeChunk(path, index, slice, { compress: true });
+        index++;
+        buffer = buffer.slice(chunkSize);
+        if (onProgress) {
+          onProgress({
+            loaded: total,
+            chunkIndex: index,
+            progress: totalSize ? total / totalSize : 0,
+          });
+        }
+      }
+    }
+    if (buffer.byteLength > 0) {
+      await this.chunkStore.writeChunk(path, index, buffer, { compress: true });
+      index++;
+      if (onProgress && totalSize) onProgress({ loaded: total, chunkIndex: index, progress: 1 });
+    }
+
+    let checksum = null;
+    if (useHash) {
+      checksum = await this._hashChunks(hashChunks);
+    }
+
+    await this.chunkStore.writeMeta(path, {
+      path,
+      chunkCount: index,
+      totalSize: total,
+      checksum,
       created: Date.now(),
-      modified: Date.now(),
-      path: path,
-      metadata: {},
-    };
-    this.files.set(path, file);
-    const parts = path.split('/');
-    let current = '';
-    for (let i = 0; i < parts.length - 1; i++) {
-      current += (current ? '/' : '') + parts[i];
-      this.folders.add(current || '/');
-    }
-    this._emitChange();
-    return file;
+    });
+
+    return { chunkCount: index, totalSize: total, checksum };
   }
 
-  removeFile(path) {
+  async _hashChunks(chunks) {
+    let total = 0;
+    for (const c of chunks) total += c.byteLength;
+    const combined = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      combined.set(c, offset);
+      offset += c.byteLength;
+    }
+    const hash = await crypto.subtle.digest('SHA-256', combined.buffer);
+    const arr = new Uint8Array(hash);
+    let s = '';
+    for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0');
+    return s;
+  }
+
+  async addFile(path, blob, type) {
+    return this._enqueue(async () => {
+      path = this._normalizePath(path);
+      const name = path.split('/').pop();
+      const meta = {
+        path,
+        name,
+        type: type || getFileType(name),
+        mimeType: blob.type || getMimeType(name),
+        size: blob.size,
+        created: Date.now(),
+        modified: Date.now(),
+        chunkCount: 0,
+        checksum: null,
+        tags: [],
+        metadata: {},
+      };
+      if (blob.size === 0) {
+        this.files.set(path, meta);
+        this._indexPath(path);
+        await this._persistMeta(meta);
+        this._emitChange('add', { path });
+        return meta;
+      }
+      const result = await this._writeStream(path, blob.stream(), {
+        totalSize: blob.size,
+        chunkSize: this.chunkSize,
+      });
+      meta.chunkCount = result.chunkCount;
+      meta.checksum = result.checksum;
+      this.files.set(path, meta);
+      this._indexPath(path);
+      this._searchIndex.set(path, this._tokenize(path));
+      await this._persistMeta(meta);
+      this._emitChange('add', { path });
+      return meta;
+    });
+  }
+
+  async getFile(path) {
+    return this.files.get(this._normalizePath(path)) || null;
+  }
+
+  async exists(path) {
+    path = this._normalizePath(path);
+    return this.files.has(path) || this.folders.has(path);
+  }
+
+  isFile(path) {
+    return this.files.has(this._normalizePath(path));
+  }
+
+  isFolder(path) {
+    return this.folders.has(this._normalizePath(path));
+  }
+
+  async readFile(path) {
+    return this.readAsBlob(path);
+  }
+
+  async readAsBlob(path) {
+    path = this._normalizePath(path);
+    const file = this.files.get(path);
+    if (!file) return null;
+    this._stats.reads++;
+    const parts = [];
+    if (file.chunkCount) {
+      for await (const { data } of this.chunkStore.iterateChunks(path, file.chunkCount)) {
+        parts.push(data);
+      }
+    }
+    this._stats.bytesRead += file.size;
+    return new Blob(parts, { type: file.mimeType });
+  }
+
+  async readRange(path, start, end) {
+    path = this._normalizePath(path);
+    const file = this.files.get(path);
+    if (!file) return null;
+    this._stats.reads++;
+    const data = await this.chunkStore.readRange(path, start, end);
+    this._stats.bytesRead += data.byteLength;
+    return new Blob([data], { type: file.mimeType });
+  }
+
+  async readAsArrayBuffer(path) {
+    const blob = await this.readAsBlob(path);
+    return blob ? blob.arrayBuffer() : null;
+  }
+
+  async readAsText(path, encoding = 'utf-8') {
+    const blob = await this.readAsBlob(path);
+    return blob ? blob.text() : null;
+  }
+
+  async readAsDataURL(path) {
+    const blob = await this.readAsBlob(path);
+    if (!blob) return null;
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async readAsStream(path) {
+    path = this._normalizePath(path);
+    const file = this.files.get(path);
+    if (!file) return null;
+    if (file.chunkCount) return this.chunkStore.readAsStream(path);
+    return new Blob([], { type: file.mimeType }).stream();
+  }
+
+  async *readChunkIterator(path) {
+    const file = this.files.get(this._normalizePath(path));
+    if (!file || !file.chunkCount) return;
+    for await (const { index, data } of this.chunkStore.iterateChunks(path, file.chunkCount)) {
+      yield { index, data };
+    }
+  }
+
+  async updateFile(path, blob) {
+    path = this._normalizePath(path);
+    const existing = this.files.get(path);
+    if (!existing) return null;
+    await this.chunkStore.deleteAllChunks(path);
+    const result = await this._writeStream(path, blob.stream(), {
+      totalSize: blob.size,
+      chunkSize: this.chunkSize,
+    });
+    existing.chunkCount = result.chunkCount;
+    existing.checksum = result.checksum;
+    existing.size = result.totalSize;
+    existing.modified = Date.now();
+    existing.mimeType = blob.type || existing.mimeType;
+    await this._persistMeta(existing);
+    this._emitChange('update', { path });
+    return existing;
+  }
+
+  async deleteFile(path) {
+    path = this._normalizePath(path);
     if (!this.files.has(path)) return false;
     this.files.delete(path);
-    this._emitChange();
+    this._searchIndex.delete(path);
+    this._searchCacheDirty = true;
+    await this.chunkStore.deleteFile(path);
+    await this._deleteMeta(path);
+    this._stats.deletes++;
+    this._emitChange('delete', { path });
     return true;
   }
 
-  moveFile(oldPath, newPath) {
+  async moveFile(oldPath, newPath) {
+    oldPath = this._normalizePath(oldPath);
+    newPath = this._normalizePath(newPath);
+    if (oldPath === newPath) return false;
     const file = this.files.get(oldPath);
     if (!file) return false;
+    if (this.files.has(newPath)) return false;
+    const meta = await this.chunkStore.readMeta(oldPath);
+    if (meta) {
+      await this.chunkStore.writeMeta(newPath, { ...meta, path: newPath });
+      await this.chunkStore.deleteMeta(oldPath);
+    }
+    const tx = this.db && this.db.transaction(this.metaStore, 'readwrite');
+    if (tx) {
+      const store = tx.objectStore(this.metaStore);
+      store.delete(oldPath);
+    }
     this.files.delete(oldPath);
+    this._searchIndex.delete(oldPath);
     file.path = newPath;
     file.name = newPath.split('/').pop();
+    file.modified = Date.now();
     this.files.set(newPath, file);
-    this._emitChange();
+    this._indexPath(newPath);
+    this._searchIndex.set(newPath, this._tokenize(newPath));
+    await this._persistMeta(file);
+    this._searchCacheDirty = true;
+    this._stats.moves++;
+    this._emitChange('move', { from: oldPath, to: newPath });
     return true;
   }
 
-  getFile(path) {
-    return this.files.get(path) || null;
+  async copyFile(sourcePath, destPath) {
+    sourcePath = this._normalizePath(sourcePath);
+    destPath = this._normalizePath(destPath);
+    const src = this.files.get(sourcePath);
+    if (!src) return null;
+    const blob = await this.readAsBlob(sourcePath);
+    return this.addFile(destPath, blob, src.type);
+  }
+
+  async createFolder(path) {
+    path = this._normalizePath(path);
+    if (this.folders.has(path)) return false;
+    this.folders.add(path);
+    await this._persistFolder(path);
+    this._emitChange('folder-create', { path });
+    return true;
+  }
+
+  async deleteFolder(path) {
+    path = this._normalizePath(path);
+    if (path === '/') return false;
+    if (!this.folders.has(path)) return false;
+    const prefix = path + '/';
+    const toDelete = [];
+    for (const p of this.files.keys()) {
+      if (p.startsWith(prefix)) toDelete.push(p);
+    }
+    for (const p of toDelete) await this.deleteFile(p);
+    this.folders.delete(path);
+    await this._deleteMeta(path);
+    this._emitChange('folder-delete', { path });
+    return true;
+  }
+
+  async _persistFolder(path) {
+    if (!this.persistence) return;
+    await this._openMetaDB();
+    const tx = this.db.transaction(this.metaStore, 'readwrite');
+    tx.objectStore(this.metaStore).put({ path, isFolder: true, created: Date.now() });
+  }
+
+  async _persistMeta(meta) {
+    if (!this.persistence) return;
+    await this._openMetaDB();
+    const tx = this.db.transaction(this.metaStore, 'readwrite');
+    tx.objectStore(this.metaStore).put({ ...meta });
+  }
+
+  async _deleteMeta(path) {
+    if (!this.persistence) return;
+    await this._openMetaDB();
+    const tx = this.db.transaction(this.metaStore, 'readwrite');
+    tx.objectStore(this.metaStore).delete(path);
   }
 
   listFolder(folderPath = '/') {
-    const contents = [];
+    folderPath = this._normalizePath(folderPath);
     const base = folderPath === '/' ? '/' : folderPath + '/';
+    const items = [];
+    const seen = new Set();
     for (const [path, file] of this.files) {
-      if (path.startsWith(base) && path !== base) {
-        const relative = path.substring(base.length);
-        if (!relative.includes('/')) {
-          contents.push({ type: 'file', ...file, path });
-        } else {
-          const folderName = relative.split('/')[0];
-          const folderPath = base + folderName;
-          if (!contents.some(c => c.type === 'folder' && c.path === folderPath)) {
-            contents.push({ type: 'folder', name: folderName, path: folderPath });
-          }
+      if (!path.startsWith(base) || path === base) continue;
+      const rel = path.slice(base.length);
+      if (!rel.includes('/')) {
+        items.push({ kind: 'file', ...file });
+        seen.add(path);
+      } else {
+        const folderName = rel.split('/')[0];
+        const folderPath2 = base + folderName;
+        if (!seen.has(folderPath2)) {
+          items.push({ kind: 'folder', name: folderName, path: folderPath2 });
+          seen.add(folderPath2);
         }
       }
     }
-    for (const folder of this.folders) {
-      if (folder.startsWith(base) && folder !== base && !folder.includes('/', base.length + 1)) {
-        const name = folder.substring(base.length);
-        if (!contents.some(c => c.type === 'folder' && c.path === folder)) {
-          contents.push({ type: 'folder', name, path: folder });
-        }
+    for (const f of this.folders) {
+      if (!f.startsWith(base) || f === base) continue;
+      const rel = f.slice(base.length);
+      if (!rel.includes('/') && !seen.has(f)) {
+        items.push({ kind: 'folder', name: rel, path: f });
+        seen.add(f);
       }
     }
-    return contents;
+    items.sort((a, b) => {
+      if (a.kind === 'folder' && b.kind !== 'folder') return -1;
+      if (a.kind !== 'folder' && b.kind === 'folder') return 1;
+      return a.name.localeCompare(b.name);
+    });
+    return items;
   }
 
-  createFolder(path) {
-    if (!this.folders.has(path)) {
-      this.folders.add(path);
-      this._emitChange();
-      return true;
+  listAllFiles() {
+    return Array.from(this.files.values());
+  }
+
+  listAllFolders() {
+    return Array.from(this.folders);
+  }
+
+  getAllFiles() {
+    return this.listAllFiles();
+  }
+
+  getTotalSize() {
+    let total = 0;
+    for (const f of this.files.values()) total += f.size || 0;
+    return total;
+  }
+
+  getStats() {
+    const byType = {};
+    for (const f of this.files.values()) {
+      byType[f.type] = (byType[f.type] || 0) + 1;
     }
-    return false;
+    return {
+      fileCount: this.files.size,
+      folderCount: this.folders.size,
+      totalSize: this.getTotalSize(),
+      byType,
+      ...this._stats,
+      chunkStore: this.chunkStore.getStats(),
+    };
   }
 
-  search(query) {
+  search(query, options = {}) {
+    if (!query) return [];
     const lower = query.toLowerCase();
+    const limit = options.limit || 500;
     const results = [];
     for (const [path, file] of this.files) {
-      if (path.toLowerCase().includes(lower) || file.name.toLowerCase().includes(lower)) {
-        results.push(file);
+      if (results.length >= limit) break;
+      const name = file.name.toLowerCase();
+      const p = path.toLowerCase();
+      if (name.includes(lower) || p.includes(lower)) {
+        results.push(this._withScore(file, name === lower ? 100 : p.includes(lower) ? 60 : 40));
       }
+    }
+    return results.sort((a, b) => b.score - a.score);
+  }
+
+  searchRegex(pattern, flags = 'i') {
+    try {
+      const re = new RegExp(pattern, flags);
+      const results = [];
+      for (const [path, file] of this.files) {
+        if (re.test(file.name) || re.test(path)) results.push(file);
+      }
+      return results;
+    } catch { return []; }
+  }
+
+  searchByType(type) {
+    const results = [];
+    for (const file of this.files.values()) {
+      if (file.type === type) results.push(file);
     }
     return results;
   }
 
-  getAllFiles() {
-    return Array.from(this.files.values());
+  searchByTag(tag) {
+    const paths = this.tags.get(tag);
+    if (!paths) return [];
+    return Array.from(paths).map(p => this.files.get(p)).filter(Boolean);
   }
 
-  // ---------------------------------------------------------------------------
-  // Serialization for state management
-  // ---------------------------------------------------------------------------
+  addTag(path, tag) {
+    path = this._normalizePath(path);
+    if (!this.files.has(path)) return false;
+    if (!this.tags.has(tag)) this.tags.set(tag, new Set());
+    this.tags.get(tag).add(path);
+    const file = this.files.get(path);
+    if (file && !file.tags.includes(tag)) file.tags.push(tag);
+    this._emitChange('tag-add', { path, tag });
+    return true;
+  }
+
+  removeTag(path, tag) {
+    path = this._normalizePath(path);
+    const set = this.tags.get(tag);
+    if (set) set.delete(path);
+    const file = this.files.get(path);
+    if (file) file.tags = file.tags.filter(t => t !== tag);
+    this._emitChange('tag-remove', { path, tag });
+    return true;
+  }
+
+  listTags() {
+    const out = {};
+    for (const [tag, paths] of this.tags) out[tag] = paths.size;
+    return out;
+  }
+
+  async calculateChecksum(path) {
+    path = this._normalizePath(path);
+    const file = this.files.get(path);
+    if (!file) return null;
+    if (file.checksum) return file.checksum;
+    const blob = await this.readAsBlob(path);
+    const buffer = await blob.arrayBuffer();
+    const hash = await crypto.subtle.digest('SHA-256', buffer);
+    const arr = new Uint8Array(hash);
+    let s = '';
+    for (let i = 0; i < arr.length; i++) s += arr[i].toString(16).padStart(2, '0');
+    file.checksum = s;
+    await this._persistMeta(file);
+    return s;
+  }
+
+  async verifyFile(path) {
+    path = this._normalizePath(path);
+    const file = this.files.get(path);
+    if (!file) return { ok: false, reason: 'missing' };
+    return this.chunkStore.verifyFile(path, file.chunkCount);
+  }
+
   serialize() {
-    const filesData = [];
-    for (const [path, file] of this.files) {
-      filesData.push({
-        path,
-        name: file.name,
-        type: file.type,
-        size: file.size,
-        created: file.created,
-        modified: file.modified,
-        metadata: file.metadata || {},
+    const files = [];
+    for (const f of this.files.values()) {
+      files.push({
+        path: f.path, name: f.name, type: f.type, mimeType: f.mimeType,
+        size: f.size, created: f.created, modified: f.modified,
+        chunkCount: f.chunkCount, checksum: f.checksum, tags: [...(f.tags || [])],
       });
     }
-    return {
-      files: filesData,
-      folders: Array.from(this.folders),
-    };
+    return { files, folders: Array.from(this.folders), tags: this.listTags() };
   }
 
-  /**
-   * Deserialize (restore) from a state object.
-   * For persistent mode, we reload from IndexedDB instead of trusting the in-memory blobs.
-   * So this method will trigger a reload from DB.
-   */
-  deserialize(state) {
+  async exportWorkspace() {
+    const bundles = [];
+    for (const path of this.files.keys()) {
+      const file = this.files.get(path);
+      const bundle = await this.chunkStore.exportPath(path, file.chunkCount);
+      bundles.push(bundle);
+    }
+    return { version: 1, bundles, meta: this.serialize() };
+  }
+
+  async importWorkspace(data) {
+    if (!data || !data.bundles) return false;
+    for (const bundle of data.bundles) {
+      await this.chunkStore.importPath(bundle);
+      const meta = await this.chunkStore.readMeta(bundle.path);
+      if (meta) {
+        const name = bundle.path.split('/').pop();
+        const file = {
+          path: bundle.path, name, type: getFileType(name),
+          mimeType: getMimeType(name), size: meta.totalSize,
+          created: meta.created || Date.now(), modified: Date.now(),
+          chunkCount: meta.chunkCount, checksum: meta.checksum, tags: [],
+        };
+        this.files.set(bundle.path, file);
+        this._indexPath(bundle.path);
+      }
+    }
+    await this.saveToDB();
+    this._emitChange('import-workspace', { count: data.bundles.length });
+    return true;
+  }
+
+  async clear() {
+    this.files.clear();
+    this.folders = new Set(['/']);
+    this.tags.clear();
+    this._searchIndex.clear();
+    this._searchCacheDirty = true;
+    await this.chunkStore.clearAll();
     if (this.persistence) {
-      this.reloadFromDB();
-    } else {
-      console.warn('Deserialize without persistence not fully implemented.');
+      await this._openMetaDB();
+      const tx = this.db.transaction(this.metaStore, 'readwrite');
+      tx.objectStore(this.metaStore).clear();
     }
+    this._emitChange('clear', {});
   }
 
-  /**
-   * Reload all file data from IndexedDB, discarding current in-memory state.
-   * Used after undo/redo to restore a consistent state.
-   */
-  async reloadFromDB() {
-    if (this.persistence) {
-      this.files.clear();
-      this.folders = new Set(['/']);
-      await this.loadFromDB();
-    } else {
-      console.warn('Undo/redo not fully supported without persistence.');
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Checksum
-  // ---------------------------------------------------------------------------
-  /**
-   * Calculate SHA-256 checksum of a file by its path
-   * @param {string} path - File path
-   * @returns {Promise<string|null>} Checksum hex string or null if file not found
-   */
-  async calculateChecksum(path) {
-    const file = this.getFile(path);
-    if (!file) return null;
-    return calculateChecksum(file.blob);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Ingestion (from File objects or ArrayBuffer)
-  // ---------------------------------------------------------------------------
-  async ingest(file, path) {
-    if (!path) path = '/' + file.name;
-    let blob = file;
-    if (file instanceof File) {
-      blob = file;
-    } else if (file instanceof ArrayBuffer || file instanceof Uint8Array) {
-      blob = new Blob([file]);
-    } else if (file instanceof Blob) {
-      // already blob
-    } else {
-      throw new Error('Unsupported file type for ingestion');
-    }
-    const type = getFileType(path.split('/').pop());
-    this.addFile(path, blob, type);
-    return this.getFile(path);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Internal change notification
-  // ---------------------------------------------------------------------------
-  _emitChange() {
-    for (const fn of this._changeListeners) {
-      try { fn(); } catch (e) {}
-    }
-  }
-
-  onChange(callback) {
-    this._changeListeners.push(callback);
-    return () => {
-      const idx = this._changeListeners.indexOf(callback);
-      if (idx !== -1) this._changeListeners.splice(idx, 1);
-    };
-  }
-
-  // ---------------------------------------------------------------------------
-  // Cleanup
-  // ---------------------------------------------------------------------------
   async destroy() {
-    if (this.db) {
-      this.db.close();
-      this.db = null;
+    await this.saveToDB();
+    await this.chunkStore.close();
+    if (this.db) { this.db.close(); this.db = null; }
+    this.ready = false;
+  }
+
+  _normalizePath(path) {
+    if (!path) return '/';
+    let p = path.replace(/\\/g, '/').trim();
+    if (!p.startsWith('/')) p = '/' + p;
+    p = p.replace(/\/+/g, '/');
+    if (p.length > 1 && p.endsWith('/')) p = p.slice(0, -1);
+    return p;
+  }
+
+  _indexPath(path) {
+    const parts = path.split('/');
+    let cur = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      cur += (cur ? '/' : '') + parts[i];
+      if (cur) this.folders.add(cur);
+    }
+    this.folders.add('/');
+  }
+
+  _tokenize(str) {
+    const tokens = new Set();
+    const lower = str.toLowerCase();
+    const parts = lower.split(/[\/\.\-_\s]+/);
+    for (const p of parts) {
+      if (!p) continue;
+      if (tokens.size >= SEARCH_TOKEN_LIMIT) break;
+      tokens.add(p);
+      for (let i = 3; i <= Math.min(p.length, 8); i++) {
+        tokens.add(p.slice(0, i));
+      }
+    }
+    return tokens;
+  }
+
+  _withScore(file, score) {
+    return { ...file, score };
+  }
+
+  _enqueue(fn) {
+    const next = this._opQueue.then(fn, fn);
+    this._opQueue = next.catch(() => {});
+    return next;
+  }
+
+  onChange(fn) {
+    this._changeListeners.add(fn);
+    return () => this._changeListeners.delete(fn);
+  }
+
+  onProgress(fn) {
+    this._progressListeners.add(fn);
+    return () => this._progressListeners.delete(fn);
+  }
+
+  _emitChange(type, payload) {
+    for (const fn of this._changeListeners) {
+      try { fn({ type, ...payload, ts: Date.now() }); } catch (e) {}
+    }
+  }
+
+  _emitProgress(payload) {
+    for (const fn of this._progressListeners) {
+      try { fn(payload); } catch (e) {}
     }
   }
 }
+
+export const FileTypes = {
+  IMAGE: 'IMAGE', VIDEO: 'VIDEO', AUDIO: 'AUDIO', TEXT: 'TEXT',
+  MODEL: 'MODEL', PDF: 'PDF', ARCHIVE: 'ARCHIVE', BINARY: 'BINARY',
+};
