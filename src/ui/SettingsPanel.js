@@ -118,17 +118,23 @@ export class SettingsPanel {
     this.shortcuts = this._loadShortcuts();
     this.activeCategory = 'appearance';
     this._shortcutRecording = null;
+
+    this.render();
   }
 
   render() {
     const c = this.container;
+    if (!c) {
+      console.warn('[SettingsPanel] no container');
+      return;
+    }
     c.innerHTML = '';
     c.style.cssText = 'display:flex;flex-direction:column;gap:14px;';
 
     const header = document.createElement('div');
     header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;';
     header.innerHTML = `
-      <h3 style="font-weight:bold;font-size:15px;color:white;margin:0;">Settings</h3>
+      <h3 style="font-weight:bold;font-size:15px;color:white;margin:0;">Preferences</h3>
       <div style="display:flex;gap:6px;">
         <button id="sx-export" class="nexus-touch" style="background:transparent;color:var(--nexus-cyan);border:1px solid var(--nexus-cyan);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;">Export</button>
         <button id="sx-import" class="nexus-touch" style="background:transparent;color:var(--nexus-cyan);border:1px solid var(--nexus-cyan);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;">Import</button>
@@ -144,7 +150,8 @@ export class SettingsPanel {
       const tab = document.createElement('button');
       tab.className = 'nexus-touch';
       tab.dataset.cat = cat.id;
-      tab.style.cssText = `display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;border:none;background:transparent;color:${cat.id === this.activeCategory ? 'var(--nexus-cyan)' : 'var(--text-muted)'};cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap;${cat.id === this.activeCategory ? 'border-bottom:2px solid var(--nexus-cyan);' : ''}`;
+      const isActive = cat.id === this.activeCategory;
+      tab.style.cssText = `display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:4px;border:none;background:transparent;color:${isActive ? 'var(--nexus-cyan)' : 'var(--text-muted)'};cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap;${isActive ? 'border-bottom:2px solid var(--nexus-cyan);' : ''}`;
       tab.innerHTML = `<i class="fas ${cat.icon}" style="font-size:11px;"></i> ${cat.label}`;
       tab.addEventListener('click', () => {
         this.activeCategory = cat.id;
@@ -170,6 +177,13 @@ export class SettingsPanel {
 
   _renderCategory(body, categoryId, data) {
     const schema = this._schemaFor(categoryId);
+    if (!schema.length) {
+      const empty = document.createElement('div');
+      empty.textContent = 'No settings available for this category.';
+      empty.style.cssText = 'color:var(--text-muted);font-size:12px;padding:20px;text-align:center;';
+      body.appendChild(empty);
+      return;
+    }
     for (const field of schema) {
       const row = this._createRow(field, data[field.key]);
       body.appendChild(row);
@@ -265,13 +279,11 @@ export class SettingsPanel {
   }
 
   _createControl(field, value) {
-    const def = this.settings[this.activeCategory][field.key];
-
     if (field.type === 'toggle') {
       const btn = document.createElement('button');
       btn.className = 'nexus-touch';
       const on = !!value;
-      btn.style.cssText = `width:44px;height:22px;border-radius:11px;border:none;cursor:pointer;position:relative;transition:background 0.2s;background:${on ? 'var(--nexus-cyan)' : '#333'};`;
+      btn.style.cssText = `width:44px;height:22px;border-radius:11px;border:none;cursor:pointer;position:relative;transition:background 0.2s;background:${on ? 'var(--nexus-cyan)' : '#333'};flex-shrink:0;`;
       const knob = document.createElement('span');
       knob.style.cssText = `position:absolute;top:2px;left:${on ? '24px' : '2px'};width:18px;height:18px;border-radius:50%;background:${on ? '#000' : '#ccc'};transition:left 0.2s;`;
       btn.appendChild(knob);
@@ -304,8 +316,6 @@ export class SettingsPanel {
     }
 
     if (field.type === 'number') {
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;align-items:center;gap:4px;';
       const inp = document.createElement('input');
       inp.type = 'number';
       inp.min = field.min ?? '';
@@ -322,15 +332,14 @@ export class SettingsPanel {
         this.settings[this.activeCategory][field.key] = v;
         this._onChange(field.key, v);
       });
-      wrap.appendChild(inp);
-      return wrap;
+      return inp;
     }
 
     if (field.type === 'color') {
       const inp = document.createElement('input');
       inp.type = 'color';
       inp.value = value || '#00f0ff';
-      inp.style.cssText = 'width:44px;height:26px;background:transparent;border:1px solid #333;border-radius:4px;cursor:pointer;';
+      inp.style.cssText = 'width:44px;height:26px;background:transparent;border:1px solid #333;border-radius:4px;cursor:pointer;flex-shrink:0;';
       inp.addEventListener('input', () => {
         this.settings[this.activeCategory][field.key] = inp.value;
         this._onChange(field.key, inp.value);
@@ -341,7 +350,7 @@ export class SettingsPanel {
     const inp = document.createElement('input');
     inp.type = 'text';
     inp.value = value || '';
-    inp.style.cssText = 'width:200px;background:#0a0a0a;color:white;border:1px solid #333;padding:4px 8px;border-radius:4px;font-size:12px;font-family:inherit;';
+    inp.style.cssText = 'width:180px;background:#0a0a0a;color:white;border:1px solid #333;padding:4px 8px;border-radius:4px;font-size:12px;font-family:inherit;';
     inp.addEventListener('change', () => {
       this.settings[this.activeCategory][field.key] = inp.value;
       this._onChange(field.key, inp.value);
@@ -351,7 +360,7 @@ export class SettingsPanel {
 
   _renderShortcuts(body) {
     const info = document.createElement('div');
-    info.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:8px;';
+    info.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:8px;padding:8px;background:#0a0a0a;border-radius:4px;border:1px solid #1a1a1a;';
     info.textContent = 'Click a shortcut to record a new binding. Press Escape to cancel.';
     body.appendChild(info);
 
@@ -370,7 +379,7 @@ export class SettingsPanel {
 
       for (const key of keys) {
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1a1a1a;';
+        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1a1a1a;gap:8px;';
 
         const label = document.createElement('span');
         label.textContent = key.split('.').slice(1).join('.');
@@ -501,7 +510,9 @@ export class SettingsPanel {
 
   _applyAppearance() {
     const a = this.settings.appearance;
-    document.documentElement.style.setProperty('--nexus-cyan', a.accentColor || '#00f0ff');
+    if (a.accentColor) {
+      document.documentElement.style.setProperty('--nexus-cyan', a.accentColor);
+    }
     if (this.themeManager && a.theme) {
       try { this.themeManager.apply(a.theme); } catch {}
     }
