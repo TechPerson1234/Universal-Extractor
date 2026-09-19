@@ -51,6 +51,11 @@ export class VFSTree {
     this._sortMode = 'name-asc';
     this._filterType = null;
     this._searchResults = null;
+    this._contextMenuSetup = false;
+    this._globalListenersSetup = false;
+
+    this._setupContextMenu();
+    this._setupGlobalListeners();
   }
 
   async init() {
@@ -112,6 +117,7 @@ export class VFSTree {
 
   _renderVisible() {
     const container = this.container;
+    if (!container) return;
     const scrollTop = container.scrollTop;
     const viewH = container.clientHeight;
     const total = this.items.length;
@@ -239,7 +245,11 @@ export class VFSTree {
         this.selectedPaths.add(item.path);
         this._renderVisible();
       }
-      this._showContextMenu(e.clientX, e.clientY, item);
+      const x = e.clientX;
+      const y = e.clientY;
+      requestAnimationFrame(() => {
+        this._showContextMenu(x, y, item);
+      });
     });
 
     el.addEventListener('touchstart', (e) => {
@@ -374,7 +384,12 @@ export class VFSTree {
   }
 
   _showContextMenu(x, y, item) {
+    if (!this.contextMenu) {
+      console.warn('[VFSTree] context menu not initialized, calling _setupContextMenu');
+      this._setupContextMenu();
+    }
     const menu = this.contextMenu;
+    if (!menu) return;
     menu.innerHTML = '';
 
     const actions = this._buildActionsFor(item);
@@ -400,12 +415,14 @@ export class VFSTree {
     }
 
     menu.style.display = 'block';
+    menu.style.visibility = 'hidden';
     const menuW = menu.offsetWidth || 200;
     const menuH = menu.offsetHeight || 200;
+    menu.style.visibility = '';
     const maxX = window.innerWidth - menuW - 8;
     const maxY = window.innerHeight - menuH - 8;
-    menu.style.left = Math.min(x, maxX) + 'px';
-    menu.style.top = Math.min(y, maxY) + 'px';
+    menu.style.left = Math.max(8, Math.min(x, maxX)) + 'px';
+    menu.style.top = Math.max(8, Math.min(y, maxY)) + 'px';
   }
 
   _buildActionsFor(item) {
@@ -435,20 +452,29 @@ export class VFSTree {
   }
 
   _setupContextMenu() {
+    if (this._contextMenuSetup && this.contextMenu) return;
+    this._contextMenuSetup = true;
+    if (this.contextMenu) {
+      try { this.contextMenu.remove(); } catch {}
+    }
     this.contextMenu = document.createElement('div');
-    this.contextMenu.style.cssText = 'position:fixed;background:var(--bg-panel);border:1px solid #333;border-radius:6px;padding:4px 0;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,0.85);z-index:9999;display:none;';
+    this.contextMenu.style.cssText = 'position:fixed;background:var(--bg-panel);border:1px solid #333;border-radius:6px;padding:4px 0;min-width:180px;box-shadow:0 8px 24px rgba(0,0,0,0.85);z-index:99999;display:none;';
     document.body.appendChild(this.contextMenu);
     document.addEventListener('click', () => {
-      this.contextMenu.style.display = 'none';
+      if (this.contextMenu) this.contextMenu.style.display = 'none';
     });
     document.addEventListener('contextmenu', (e) => {
-      if (!this.contextMenu.contains(e.target)) {
-        this.contextMenu.style.display = 'none';
+      if (this.contextMenu && !this.contextMenu.contains(e.target)) {
+        const insideTree = e.target.closest && e.target.closest('.vfs-item');
+        if (!insideTree) this.contextMenu.style.display = 'none';
       }
     });
   }
 
   _setupGlobalListeners() {
+    if (this._globalListenersSetup) return;
+    this._globalListenersSetup = true;
+
     this.container.addEventListener('scroll', () => {
       if (this._scrollRaf) return;
       this._scrollRaf = requestAnimationFrame(() => {
@@ -549,8 +575,10 @@ export class VFSTree {
       if (quotaEl && navigator.storage && navigator.storage.estimate) {
         navigator.storage.estimate().then(est => {
           const pct = est.quota ? ((est.usage / est.quota) * 100).toFixed(0) : 0;
-          quotaEl.textContent = `${pct}%`;
-          quotaEl.style.color = pct > 85 ? '#ff003c' : pct > 60 ? '#ffcc00' : 'var(--nexus-cyan)';
+          if (quotaEl) {
+            quotaEl.textContent = `${pct}%`;
+            quotaEl.style.color = pct > 85 ? '#ff003c' : pct > 60 ? '#ffcc00' : 'var(--nexus-cyan)';
+          }
         }).catch(() => {});
       }
     }
