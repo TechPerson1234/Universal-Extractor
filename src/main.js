@@ -15,6 +15,8 @@ import { CodecService } from './services/CodecService.js';
 import { IndexedDBService } from './services/IndexedDBService.js';
 import { SettingsStore } from './services/SettingsStore.js';
 
+import { StorageManager } from './utils/storageManager.js';
+
 const DI = {
   eventBus: null,
   stateManager: null,
@@ -30,6 +32,7 @@ const DI = {
   codecService: null,
   indexedDBService: null,
   settingsStore: null,
+  storageManager: null,
   app: null,
   bootedAt: null,
   version: '5.0.0',
@@ -88,7 +91,7 @@ function _hideOverlay() {
 
 function _showFatal(err) {
   _bootErrors.push(err);
-  _setStatus('⚠ ' + (err?.message || String(err)), true);
+  _setStatus('⚠ ' + (err && err.message ? err.message : String(err)), true);
   const overlay = document.getElementById('loading-overlay');
   if (!overlay) return;
   const existing = document.getElementById('fatal-panel');
@@ -98,7 +101,7 @@ function _showFatal(err) {
   panel.style.cssText = 'position:fixed;bottom:20px;left:20px;right:20px;max-width:640px;margin:0 auto;background:#1a1a1a;border:1px solid #ff003c;border-radius:8px;padding:16px;color:#e0e0e0;font-family:monospace;font-size:12px;z-index:10001;box-shadow:0 12px 32px rgba(0,0,0,0.85);';
   panel.innerHTML = `
     <div style="font-weight:bold;color:#ff003c;margin-bottom:8px;font-size:14px;">BOOT FAILURE</div>
-    <div style="color:#ccc;margin-bottom:12px;line-height:1.5;">${(err?.message || String(err)).replace(/</g, '&lt;')}</div>
+    <div style="color:#ccc;margin-bottom:12px;line-height:1.5;">${(err && err.message ? err.message : String(err)).replace(/</g, '&lt;')}</div>
     <div style="display:flex;gap:8px;">
       <button id="fatal-reload" style="background:#ff003c;color:#fff;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-weight:bold;">Reload</button>
       <button id="fatal-copy" style="background:transparent;color:#ccc;border:1px solid #555;padding:6px 14px;border-radius:4px;cursor:pointer;">Copy Error</button>
@@ -106,13 +109,15 @@ function _showFatal(err) {
     </div>
     <details style="margin-top:12px;font-size:11px;color:#888;">
       <summary style="cursor:pointer;">Stack trace</summary>
-      <pre style="margin-top:8px;white-space:pre-wrap;word-break:break-all;">${(err?.stack || '').replace(/</g, '&lt;')}</pre>
+      <pre style="margin-top:8px;white-space:pre-wrap;word-break:break-all;">${(err && err.stack ? err.stack : '').replace(/</g, '&lt;')}</pre>
     </details>
   `;
   overlay.appendChild(panel);
   panel.querySelector('#fatal-reload').onclick = () => location.reload();
   panel.querySelector('#fatal-copy').onclick = () => {
-    navigator.clipboard?.writeText(err?.stack || String(err));
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText((err && err.stack) ? err.stack : String(err));
+    }
   };
   panel.querySelector('#fatal-dismiss').onclick = () => panel.remove();
 }
@@ -156,11 +161,11 @@ async function _warmupQuota() {
 function _installGlobalErrorBoundary() {
   window.addEventListener('error', (event) => {
     console.error('[NEXUS] window error', event.error || event.message);
-    if (DI.app) DI.app.showError?.(event.error || event.message);
+    if (DI.app && DI.app.showError) DI.app.showError(event.error || event.message);
   });
   window.addEventListener('unhandledrejection', (event) => {
     console.error('[NEXUS] unhandled rejection', event.reason);
-    if (DI.app) DI.app.showError?.(event.reason);
+    if (DI.app && DI.app.showError) DI.app.showError(event.reason);
   });
 }
 
@@ -177,7 +182,7 @@ function _installVisibilitySaver() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && DI.vfs) {
       try { DI.vfs.saveToDB(); } catch (e) {}
-      try { DI.settingsStore?._save?.(); } catch (e) {}
+      try { if (DI.settingsStore && DI.settingsStore._save) DI.settingsStore._save(); } catch (e) {}
     }
   });
 }
@@ -188,12 +193,12 @@ function _installPWAEventHandlers() {
       const data = event.data;
       if (!data) return;
       if (data.type === 'file-shared' && data.file) {
-        DI.importService?.importFiles([data.file]).catch((e) =>
+        DI.importService.importFiles([data.file]).catch((e) =>
           console.error('Share target import failed', e)
         );
       }
       if (data.type === 'update-available') {
-        DI.eventBus?.emit('pwa:update-available');
+        if (DI.eventBus) DI.eventBus.emit('pwa:update-available');
       }
     });
   }
@@ -203,10 +208,12 @@ function _installPWAEventHandlers() {
       if (!params.files || !params.files.length) return;
       const files = [];
       for (const handle of params.files) {
-        try { files.push(await handle.getFile()); } catch {}
+        try {
+          files.push(await handle.getFile());
+        } catch {}
       }
-      if (files.length) {
-        DI.importService?.importFiles(files).catch((e) =>
+      if (files.length && DI.importService) {
+        DI.importService.importFiles(files).catch((e) =>
           console.error('Launch queue import failed', e)
         );
       }
@@ -217,31 +224,41 @@ function _installPWAEventHandlers() {
 function _wireServiceEvents() {
   if (!DI.eventBus) return;
 
-  DI.workerManager?.subscribe((evt) => {
-    DI.eventBus.emit('worker:' + evt.type, evt);
-  });
+  if (DI.workerManager) {
+    DI.workerManager.subscribe((evt) => {
+      DI.eventBus.emit('worker:' + evt.type, evt);
+    });
+  }
 
-  DI.vfs?.onProgress((p) => {
-    DI.eventBus.emit('vfs:progress', p);
-  });
+  if (DI.vfs) {
+    DI.vfs.onProgress((p) => {
+      DI.eventBus.emit('vfs:progress', p);
+    });
+    DI.vfs.onChange((evt) => {
+      DI.eventBus.emit('vfs:changed', evt);
+    });
+  }
 
-  DI.vfs?.onChange((evt) => {
-    DI.eventBus.emit('vfs:changed', evt);
-  });
+  if (DI.settingsStore) {
+    DI.settingsStore.subscribe((evt) => {
+      DI.eventBus.emit('settings:changed', evt);
+      if (evt.path === 'appearance.theme' && DI.themeManager) {
+        try { DI.themeManager.apply(evt.value); } catch {}
+      }
+      if (evt.path === 'appearance.accentColor') {
+        document.documentElement.style.setProperty('--nexus-cyan', evt.value);
+      }
+    });
+    DI.settingsStore.subscribeShortcuts((evt) => {
+      DI.eventBus.emit('shortcuts:changed', evt);
+    });
+  }
 
-  DI.settingsStore?.subscribe((evt) => {
-    DI.eventBus.emit('settings:changed', evt);
-    if (evt.path === 'appearance.theme' && DI.themeManager) {
-      try { DI.themeManager.apply(evt.value); } catch {}
-    }
-    if (evt.path === 'appearance.accentColor') {
-      document.documentElement.style.setProperty('--nexus-cyan', evt.value);
-    }
-  });
-
-  DI.settingsStore?.subscribeShortcuts((evt) => {
-    DI.eventBus.emit('shortcuts:changed', evt);
-  });
+  if (DI.storageManager) {
+    DI.storageManager.subscribe((evt) => {
+      DI.eventBus.emit('storage:' + evt.type, evt.data);
+    });
+  }
 }
 
 function _applyStoredSettings() {
@@ -333,7 +350,11 @@ async function _bootServices() {
   _setStatus('Wiring services...');
 
   DI.streamPipeline = new StreamPipeline(
-    new ReadableStream({ start(c) { c.close(); } })
+    new ReadableStream({
+      start(c) {
+        c.close();
+      },
+    })
   );
 
   DI.fileService = new FileService({
@@ -360,6 +381,14 @@ async function _bootServices() {
     urlTimeout: 60000,
   });
 
+  DI.storageManager = new StorageManager({
+    vfs: DI.vfs,
+    chunkStore: DI.chunkStore,
+    indexedDBService: DI.indexedDBService,
+    eventBus: DI.eventBus,
+    settingsStore: DI.settingsStore,
+  });
+
   _advanceProgress(10);
   return {
     fileService: DI.fileService,
@@ -367,6 +396,7 @@ async function _bootServices() {
     workerManager: DI.workerManager,
     codecService: DI.codecService,
     importService: DI.importService,
+    storageManager: DI.storageManager,
   };
 }
 
@@ -394,8 +424,9 @@ async function _bootPlugins() {
 
 async function _bootStateManager() {
   _setStatus('Preparing state manager...');
+  const maxHistory = DI.settingsStore ? DI.settingsStore.get('storage.maxHistory', 50) : 50;
   DI.stateManager = new StateManager({
-    maxHistory: DI.settingsStore?.get('storage.maxHistory', 50) || 50,
+    maxHistory: maxHistory || 50,
     persist: true,
     diffMode: true,
   });
@@ -419,6 +450,7 @@ async function _bootApp() {
     codecService: DI.codecService,
     settingsStore: DI.settingsStore,
     chunkStore: DI.chunkStore,
+    storageManager: DI.storageManager,
   });
 
   _advanceProgress(10);
@@ -525,6 +557,7 @@ export async function bootstrap(options = {}) {
       export: DI.exportService,
       import: DI.importService,
       idb: DI.indexedDBService,
+      storage: DI.storageManager,
       version: DI.version,
       di: DI,
     };
@@ -536,9 +569,9 @@ export async function bootstrap(options = {}) {
       bootedAt: DI.bootedAt,
       version: DI.version,
       stats: {
-        workers: DI.workerManager?.getStats(),
-        vfs: DI.vfs?.getStats(),
-        settings: DI.settingsStore?.getStorage(),
+        workers: DI.workerManager ? DI.workerManager.getStats() : null,
+        vfs: DI.vfs ? DI.vfs.getStats() : null,
+        settings: DI.settingsStore ? DI.settingsStore.getStorage() : null,
       },
       errors: _bootErrors.length,
     });
@@ -561,20 +594,38 @@ export function getDI() {
   return DI;
 }
 
-export function getApp() { return DI.app; }
-export function getVFS() { return DI.vfs; }
-export function getEventBus() { return DI.eventBus; }
-export function getSettings() { return DI.settingsStore; }
-export function getWorkers() { return DI.workerManager; }
+export function getApp() {
+  return DI.app;
+}
+
+export function getVFS() {
+  return DI.vfs;
+}
+
+export function getEventBus() {
+  return DI.eventBus;
+}
+
+export function getSettings() {
+  return DI.settingsStore;
+}
+
+export function getWorkers() {
+  return DI.workerManager;
+}
+
+export function getStorageManager() {
+  return DI.storageManager;
+}
 
 export async function shutdown() {
   try {
-    if (DI.app) await DI.app.destroy?.();
+    if (DI.app && DI.app.destroy) await DI.app.destroy();
     if (DI.workerManager) DI.workerManager.terminateAll();
-    if (DI.vfs) await DI.vfs.destroy?.();
-    if (DI.chunkStore) await DI.chunkStore.close?.();
-    if (DI.indexedDBService) await DI.indexedDBService.close?.();
-    if (DI.stateManager) DI.stateManager.clear?.();
+    if (DI.vfs && DI.vfs.destroy) await DI.vfs.destroy();
+    if (DI.chunkStore && DI.chunkStore.close) await DI.chunkStore.close();
+    if (DI.indexedDBService && DI.indexedDBService.close) await DI.indexedDBService.close();
+    if (DI.stateManager && DI.stateManager.clear) DI.stateManager.clear();
   } catch (e) {
     console.error('[NEXUS] shutdown error', e);
   } finally {
