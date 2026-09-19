@@ -4,7 +4,7 @@ const CHUNK_PREVIEW = 512 * 1024;
 export const TextEditorPlugin = {
   type: 'TEXT',
   name: 'Text Editor',
-  version: '2.0.0',
+  version: '2.0.1',
 
   async init(surface, tools, file) {
     const state = {
@@ -19,6 +19,7 @@ export const TextEditorPlugin = {
       encoding: 'utf-8',
       history: [],
       historyIndex: -1,
+      destroyed: false,
     };
 
     surface.innerHTML = `
@@ -87,7 +88,10 @@ export const TextEditorPlugin = {
     const statsEl = document.getElementById('txt-stats');
     const largeOverlay = document.getElementById('txt-large-overlay');
 
+    const isAlive = () => !state.destroyed && editor && editor.isConnected;
+
     const updateLines = () => {
+      if (!isAlive() || !linesEl) return;
       if (!state.showLines) {
         linesEl.style.display = 'none';
         return;
@@ -109,19 +113,24 @@ export const TextEditorPlugin = {
     };
 
     const updateStats = () => {
+      if (!isAlive()) return;
       const content = editor.value;
       const lines = content.split('\n').length;
       const chars = content.length;
       const words = content.trim() ? content.trim().split(/\s+/).length : 0;
-      infoEl.textContent = `${lines} lines · ${chars.toLocaleString()} chars`;
-      statsEl.innerHTML = `
-        Lines: ${lines.toLocaleString()}<br>
-        Chars: ${chars.toLocaleString()}<br>
-        Words: ${words.toLocaleString()}<br>
-        Bytes: ${new Blob([content]).size.toLocaleString()}<br>
-        Encoding: ${state.encoding}<br>
-        ${state.largeFile ? '<span style="color:#ffcc00;">Large file mode</span>' : ''}
-      `;
+      if (infoEl && infoEl.isConnected) {
+        infoEl.textContent = `${lines} lines · ${chars.toLocaleString()} chars`;
+      }
+      if (statsEl && statsEl.isConnected) {
+        statsEl.innerHTML = `
+          Lines: ${lines.toLocaleString()}<br>
+          Chars: ${chars.toLocaleString()}<br>
+          Words: ${words.toLocaleString()}<br>
+          Bytes: ${new Blob([content]).size.toLocaleString()}<br>
+          Encoding: ${state.encoding}<br>
+          ${state.largeFile ? '<span style="color:#ffcc00;">Large file mode</span>' : ''}
+        `;
+      }
     };
 
     const loadContent = async () => {
@@ -158,16 +167,19 @@ export const TextEditorPlugin = {
     };
 
     editor.addEventListener('input', () => {
+      if (!isAlive()) return;
       state.dirty = editor.value !== state.originalContent;
       updateLines();
       updateStats();
     });
 
     editor.addEventListener('scroll', () => {
+      if (!isAlive() || !linesEl) return;
       linesEl.scrollTop = editor.scrollTop;
     });
 
     editor.addEventListener('keydown', (e) => {
+      if (!isAlive()) return;
       if (e.key === 'Tab') {
         e.preventDefault();
         const start = editor.selectionStart;
@@ -183,6 +195,7 @@ export const TextEditorPlugin = {
     });
 
     const saveFile = async () => {
+      if (!isAlive()) return;
       const app = window.__NEXUS_DI?.app;
       if (!app?.vfs) return;
       const blob = new Blob([editor.value], { type: file.mimeType || 'text/plain' });
@@ -193,9 +206,15 @@ export const TextEditorPlugin = {
       app.notifications?.show('File saved', 'success');
     };
 
-    document.getElementById('txt-save').addEventListener('click', saveFile);
+    const bindIfAlive = (id, handler) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', handler);
+    };
 
-    document.getElementById('txt-save-as').addEventListener('click', () => {
+    bindIfAlive('txt-save', saveFile);
+
+    bindIfAlive('txt-save-as', () => {
+      if (!isAlive()) return;
       const blob = new Blob([editor.value], { type: 'text/plain' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -204,7 +223,8 @@ export const TextEditorPlugin = {
       setTimeout(() => URL.revokeObjectURL(a.href), 5000);
     });
 
-    document.getElementById('txt-format-json').addEventListener('click', () => {
+    bindIfAlive('txt-format-json', () => {
+      if (!isAlive()) return;
       try {
         const parsed = JSON.parse(editor.value);
         editor.value = JSON.stringify(parsed, null, 2);
@@ -216,7 +236,8 @@ export const TextEditorPlugin = {
       }
     });
 
-    document.getElementById('txt-minify-json').addEventListener('click', () => {
+    bindIfAlive('txt-minify-json', () => {
+      if (!isAlive()) return;
       try {
         const parsed = JSON.parse(editor.value);
         editor.value = JSON.stringify(parsed);
@@ -228,14 +249,16 @@ export const TextEditorPlugin = {
       }
     });
 
-    document.getElementById('txt-trim').addEventListener('click', () => {
+    bindIfAlive('txt-trim', () => {
+      if (!isAlive()) return;
       editor.value = editor.value.split('\n').map(l => l.replace(/\s+$/, '')).join('\n');
       state.dirty = true;
       updateLines();
       updateStats();
     });
 
-    document.getElementById('txt-dedupe').addEventListener('click', () => {
+    bindIfAlive('txt-dedupe', () => {
+      if (!isAlive()) return;
       const lines = editor.value.split('\n');
       const seen = new Set();
       const unique = lines.filter(l => {
@@ -249,24 +272,31 @@ export const TextEditorPlugin = {
       updateStats();
     });
 
-    document.getElementById('txt-upper').addEventListener('click', () => {
+    bindIfAlive('txt-upper', () => {
+      if (!isAlive()) return;
       editor.value = editor.value.toUpperCase();
       state.dirty = true;
     });
 
-    document.getElementById('txt-lower').addEventListener('click', () => {
+    bindIfAlive('txt-lower', () => {
+      if (!isAlive()) return;
       editor.value = editor.value.toLowerCase();
       state.dirty = true;
     });
 
-    document.getElementById('txt-wrap').addEventListener('click', () => {
+    bindIfAlive('txt-wrap', () => {
+      if (!isAlive()) return;
       state.wrapped = !state.wrapped;
       editor.style.whiteSpace = state.wrapped ? 'pre-wrap' : 'pre';
-      document.getElementById('txt-wrap').style.background = state.wrapped ? 'rgba(0,240,255,0.15)' : '#1a1a1a';
-      document.getElementById('txt-wrap').style.color = state.wrapped ? 'var(--nexus-cyan)' : '#ccc';
+      const btn = document.getElementById('txt-wrap');
+      if (btn) {
+        btn.style.background = state.wrapped ? 'rgba(0,240,255,0.15)' : '#1a1a1a';
+        btn.style.color = state.wrapped ? 'var(--nexus-cyan)' : '#ccc';
+      }
     });
 
-    document.getElementById('txt-lines-toggle').addEventListener('click', () => {
+    bindIfAlive('txt-lines-toggle', () => {
+      if (!isAlive()) return;
       state.showLines = !state.showLines;
       updateLines();
     });
@@ -275,7 +305,10 @@ export const TextEditorPlugin = {
     let searchIndex = -1;
 
     const performFind = () => {
-      const query = document.getElementById('txt-search').value;
+      if (!isAlive()) return;
+      const searchInput = document.getElementById('txt-search');
+      if (!searchInput) return;
+      const query = searchInput.value;
       if (!query) return;
       const content = editor.value;
       searchMatches = [];
@@ -296,37 +329,48 @@ export const TextEditorPlugin = {
     };
 
     const highlightMatch = () => {
+      if (!isAlive()) return;
       if (searchIndex < 0 || searchIndex >= searchMatches.length) return;
+      const searchInput = document.getElementById('txt-search');
+      if (!searchInput) return;
       const start = searchMatches[searchIndex];
-      const len = document.getElementById('txt-search').value.length;
+      const len = searchInput.value.length;
       editor.focus();
       editor.setSelectionRange(start, start + len);
       const lineHeight = 19.5;
       const lineNum = editor.value.substring(0, start).split('\n').length - 1;
       editor.scrollTop = Math.max(0, lineNum * lineHeight - editor.clientHeight / 2);
-      linesEl.scrollTop = editor.scrollTop;
+      if (linesEl) linesEl.scrollTop = editor.scrollTop;
     };
 
-    document.getElementById('txt-find').addEventListener('click', performFind);
-    document.getElementById('txt-search').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); performFind(); }
-    });
+    bindIfAlive('txt-find', performFind);
 
-    document.getElementById('txt-find-next').addEventListener('click', () => {
+    const searchInputEl = document.getElementById('txt-search');
+    if (searchInputEl) {
+      searchInputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); performFind(); }
+      });
+    }
+
+    bindIfAlive('txt-find-next', () => {
       if (searchMatches.length === 0) return performFind();
       searchIndex = (searchIndex + 1) % searchMatches.length;
       highlightMatch();
     });
 
-    document.getElementById('txt-find-prev').addEventListener('click', () => {
+    bindIfAlive('txt-find-prev', () => {
       if (searchMatches.length === 0) return performFind();
       searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length;
       highlightMatch();
     });
 
-    document.getElementById('txt-replace-one').addEventListener('click', () => {
-      const query = document.getElementById('txt-search').value;
-      const replace = document.getElementById('txt-replace').value;
+    bindIfAlive('txt-replace-one', () => {
+      if (!isAlive()) return;
+      const searchInput = document.getElementById('txt-search');
+      const replaceInput = document.getElementById('txt-replace');
+      if (!searchInput || !replaceInput) return;
+      const query = searchInput.value;
+      const replace = replaceInput.value;
       if (!query) return;
       const start = editor.selectionStart;
       const end = editor.selectionEnd;
@@ -341,9 +385,13 @@ export const TextEditorPlugin = {
       updateStats();
     });
 
-    document.getElementById('txt-replace-all').addEventListener('click', () => {
-      const query = document.getElementById('txt-search').value;
-      const replace = document.getElementById('txt-replace').value;
+    bindIfAlive('txt-replace-all', () => {
+      if (!isAlive()) return;
+      const searchInput = document.getElementById('txt-search');
+      const replaceInput = document.getElementById('txt-replace');
+      if (!searchInput || !replaceInput) return;
+      const query = searchInput.value;
+      const replace = replaceInput.value;
       if (!query) return;
       const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
       const count = (editor.value.match(regex) || []).length;
@@ -358,8 +406,8 @@ export const TextEditorPlugin = {
 
     const app = window.__NEXUS_DI?.app;
     if (app) {
-      const originalUpdate = editor.oninput;
       editor.addEventListener('input', () => {
+        if (!isAlive()) return;
         if (state.dirty) app.tabManager?.setDirty(file.path, true);
         else app.tabManager?.setDirty(file.path, false);
       });
@@ -370,7 +418,7 @@ export const TextEditorPlugin = {
       isDirty: () => state.dirty,
       save: saveFile,
       destroy: () => {
-        editor.removeEventListener('input', saveFile);
+        state.destroyed = true;
       },
     };
   },
