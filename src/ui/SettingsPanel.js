@@ -102,6 +102,7 @@ const CATEGORIES = [
   { id: 'performance', label: 'Performance', icon: 'fa-tachometer-alt' },
   { id: 'plugins', label: 'Plugins', icon: 'fa-puzzle-piece' },
   { id: 'storage', label: 'Storage', icon: 'fa-database' },
+  { id: 'data', label: 'Data', icon: 'fa-server' },
   { id: 'shortcuts', label: 'Shortcuts', icon: 'fa-keyboard' },
   { id: 'network', label: 'Network', icon: 'fa-wifi' },
   { id: 'advanced', label: 'Advanced', icon: 'fa-flask' },
@@ -167,6 +168,8 @@ export class SettingsPanel {
 
     if (this.activeCategory === 'shortcuts') {
       this._renderShortcuts(body);
+    } else if (this.activeCategory === 'data') {
+      this._renderDataPanel(body);
     } else {
       const cat = this.settings[this.activeCategory] || {};
       this._renderCategory(body, this.activeCategory, cat);
@@ -442,6 +445,258 @@ export class SettingsPanel {
     return parts.join('+');
   }
 
+  _renderDataPanel(body) {
+    const info = document.createElement('div');
+    info.style.cssText = 'font-size:11px;color:var(--text-muted);padding:10px 12px;background:#0a0a0a;border-radius:4px;border:1px solid #1a1a1a;line-height:1.5;';
+    info.textContent = 'Manage stored files, caches, and IndexedDB data. Destructive actions cannot be undone.';
+    body.appendChild(info);
+
+    const usageBox = document.createElement('div');
+    usageBox.style.cssText = 'padding:12px;background:#0a0a0a;border-radius:6px;border:1px solid #1a1a1a;display:flex;flex-direction:column;gap:10px;';
+    usageBox.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:11px;font-weight:bold;color:var(--nexus-cyan);text-transform:uppercase;letter-spacing:0.08em;">Storage Usage</span>
+        <button id="sx-usage-refresh" class="nexus-touch" style="background:transparent;border:none;color:#666;cursor:pointer;font-size:11px;padding:2px 6px;">
+          <i class="fas fa-sync-alt"></i> Refresh
+        </button>
+      </div>
+      <div id="sx-usage-content" style="font-size:11px;color:#888;font-family:monospace;line-height:1.7;">
+        Loading...
+      </div>
+      <div style="height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;">
+        <div id="sx-usage-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#00f0ff,#8a2be2);transition:width 0.3s;"></div>
+      </div>
+    `;
+    body.appendChild(usageBox);
+
+    const actionBox = document.createElement('div');
+    actionBox.style.cssText = 'padding:12px;background:#0a0a0a;border-radius:6px;border:1px solid #1a1a1a;display:flex;flex-direction:column;gap:8px;';
+    actionBox.innerHTML = `
+      <div style="font-size:11px;font-weight:bold;color:#ff003c;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Danger Zone</div>
+
+      <button id="sx-clear-blobs" class="nexus-touch" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:transparent;border:1px solid #8a2be2;color:#8a2be2;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;text-align:left;">
+        <span><i class="fas fa-memory"></i> Clear Blob Cache</span>
+        <span style="font-size:10px;opacity:0.6;">frees RAM only</span>
+      </button>
+
+      <button id="sx-rebuild" class="nexus-touch" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:transparent;border:1px solid #00f0ff;color:#00f0ff;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;text-align:left;">
+        <span><i class="fas fa-tools"></i> Rebuild Search Index</span>
+        <span style="font-size:10px;opacity:0.6;">non-destructive</span>
+      </button>
+
+      <button id="sx-clear-files" class="nexus-touch" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:transparent;border:1px solid #ffcc00;color:#ffcc00;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;text-align:left;">
+        <span><i class="fas fa-broom"></i> Clear All Files</span>
+        <span style="font-size:10px;opacity:0.6;">keeps settings</span>
+      </button>
+
+      <button id="sx-clear-everything" class="nexus-touch" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(255,0,60,0.1);border:1px solid #ff003c;color:#ff003c;border-radius:4px;cursor:pointer;font-size:12px;font-family:inherit;text-align:left;font-weight:bold;">
+        <span><i class="fas fa-trash-alt"></i> Clear Everything</span>
+        <span style="font-size:10px;opacity:0.7;">files + settings + caches</span>
+      </button>
+    `;
+    body.appendChild(actionBox);
+
+    const progressBox = document.createElement('div');
+    progressBox.id = 'sx-progress-box';
+    progressBox.style.cssText = 'display:none;padding:12px;background:#0a0a0a;border-radius:6px;border:1px solid #1a1a1a;';
+    progressBox.innerHTML = `
+      <div id="sx-progress-label" style="font-size:11px;color:var(--nexus-cyan);margin-bottom:6px;font-family:monospace;">Working...</div>
+      <div style="height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;">
+        <div id="sx-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#00f0ff,#8a2be2);transition:width 0.3s;"></div>
+      </div>
+    `;
+    body.appendChild(progressBox);
+
+    this._refreshUsage();
+    this._bindDataPanelEvents();
+  }
+
+  async _refreshUsage() {
+    const content = document.getElementById('sx-usage-content');
+    const bar = document.getElementById('sx-usage-bar');
+    if (!content || !bar) return;
+
+    const di = window.__NEXUS_DI;
+    const sm = di && di.storageManager;
+
+    if (!sm) {
+      content.innerHTML = '<span style="color:#ff003c;">StorageManager not initialized</span>';
+      bar.style.width = '0%';
+      return;
+    }
+
+    try {
+      const usage = await sm.getUsage();
+      const fmt = (b) => {
+        if (!b) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(b) / Math.log(k));
+        return (b / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+      };
+
+      const persistLabel = usage.persisted
+        ? '<span style="color:#00ff41;">persistent</span>'
+        : '<span style="color:#ffcc00;">best-effort</span>';
+
+      content.innerHTML = `
+        <div style="display:flex;justify-content:space-between;"><span>Files:</span><span style="color:#ccc;">${usage.totalFiles}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>File Bytes:</span><span style="color:#ccc;">${fmt(usage.totalBytes)}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Chunk Cache:</span><span style="color:#ccc;">${usage.chunkCache.entries} · ${fmt(usage.chunkCache.bytes)}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Blob Cache:</span><span style="color:#ccc;">${usage.blobCache.entries} · ${fmt(usage.blobCache.bytes)}</span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:6px;padding-top:6px;border-top:1px solid #1a1a1a;">
+          <span>Browser:</span>
+          <span style="color:#ccc;">${fmt(usage.estimate.usage)} / ${fmt(usage.estimate.quota)} (${usage.estimate.percent.toFixed(1)}%)</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;"><span>Mode:</span><span>${persistLabel}</span></div>
+      `;
+
+      const pct = Math.min(100, usage.estimate.percent);
+      bar.style.width = pct + '%';
+      if (pct > 85) {
+        bar.style.background = 'linear-gradient(90deg,#ff003c,#ffcc00)';
+      } else if (pct > 60) {
+        bar.style.background = 'linear-gradient(90deg,#ffcc00,#00f0ff)';
+      } else {
+        bar.style.background = 'linear-gradient(90deg,#00f0ff,#8a2be2)';
+      }
+    } catch (err) {
+      content.innerHTML = `<span style="color:#ff003c;">Failed to read storage: ${err.message}</span>`;
+    }
+  }
+
+  _bindDataPanelEvents() {
+    const refreshBtn = document.getElementById('sx-usage-refresh');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', () => this._refreshUsage());
+    }
+
+    const clearBlobs = document.getElementById('sx-clear-blobs');
+    if (clearBlobs) {
+      clearBlobs.addEventListener('click', async () => {
+        const di = window.__NEXUS_DI;
+        if (di && di.vfs && typeof di.vfs.clearBlobCache === 'function') {
+          di.vfs.clearBlobCache();
+          this._showToast('Blob cache cleared', 'success');
+          this._refreshUsage();
+        }
+      });
+    }
+
+    const rebuild = document.getElementById('sx-rebuild');
+    if (rebuild) {
+      rebuild.addEventListener('click', async () => {
+        const di = window.__NEXUS_DI;
+        const sm = di && di.storageManager;
+        if (!sm) return;
+        this._showProgress('Rebuilding search index...', 0);
+        try {
+          const result = await sm.rebuildIndexes();
+          this._showProgress(`Rebuilt ${result.count} entries`, 100);
+          setTimeout(() => this._hideProgress(), 1500);
+          this._showToast('Search index rebuilt', 'success');
+          this._refreshUsage();
+        } catch (err) {
+          this._hideProgress();
+          this._showToast('Rebuild failed: ' + err.message, 'error');
+        }
+      });
+    }
+
+    const clearFiles = document.getElementById('sx-clear-files');
+    if (clearFiles) {
+      clearFiles.addEventListener('click', async () => {
+        const di = window.__NEXUS_DI;
+        const sm = di && di.storageManager;
+        if (!sm) return;
+        const usage = await sm.getUsage();
+        const msg = `Delete ALL files?\n\nThis will remove:\n• ${usage.totalFiles} files\n• All chunks from IndexedDB\n• Blob cache\n\nYour settings will be kept.\n\nThis CANNOT be undone.`;
+        if (!confirm(msg)) return;
+        this._showProgress('Deleting files...', 10);
+        try {
+          const result = await sm.clearFiles();
+          this._showProgress(`Deleted ${result.files} files`, 100);
+          setTimeout(() => this._hideProgress(), 1500);
+          this._showToast(`Cleared ${result.files} files (${this._fmtBytes(result.bytes)})`, 'success');
+          if (di.eventBus) di.eventBus.emit('vfs:changed');
+          if (di.app) {
+            if (di.app.tabManager && typeof di.app.tabManager.closeAll === 'function') {
+              di.app.tabManager.closeAll();
+            }
+            if (di.app.inspector && typeof di.app.inspector.clear === 'function') {
+              di.app.inspector.clear();
+            }
+            if (di.app.uiManager && typeof di.app.uiManager.clearEditor === 'function') {
+              di.app.uiManager.clearEditor();
+            }
+          }
+          this._refreshUsage();
+        } catch (err) {
+          this._hideProgress();
+          this._showToast('Clear failed: ' + err.message, 'error');
+        }
+      });
+    }
+
+    const clearEverything = document.getElementById('sx-clear-everything');
+    if (clearEverything) {
+      clearEverything.addEventListener('click', async () => {
+        const msg = 'Delete EVERYTHING?\n\nThis will remove:\n• All files\n• All chunks\n• All settings\n• All shortcuts\n• Service worker caches\n• All IndexedDB data\n\nThe page will reload afterward.\n\nThis CANNOT be undone.';
+        if (!confirm(msg)) return;
+        if (!confirm('Are you absolutely sure? This is the last warning.')) return;
+        const di = window.__NEXUS_DI;
+        const sm = di && di.storageManager;
+        if (!sm) return;
+        this._showProgress('Clearing everything...', 5);
+        try {
+          await sm.clearEverything();
+          this._showProgress('Reloading...', 100);
+          setTimeout(() => {
+            if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+              navigator.serviceWorker.controller.postMessage({ type: 'SKIP_WAITING' });
+            }
+            window.location.reload();
+          }, 800);
+        } catch (err) {
+          this._hideProgress();
+          this._showToast('Clear failed: ' + err.message, 'error');
+        }
+      });
+    }
+  }
+
+  _showProgress(label, pct) {
+    const box = document.getElementById('sx-progress-box');
+    const lbl = document.getElementById('sx-progress-label');
+    const bar = document.getElementById('sx-progress-bar');
+    if (!box || !lbl || !bar) return;
+    box.style.display = 'block';
+    lbl.textContent = label;
+    bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+
+  _hideProgress() {
+    const box = document.getElementById('sx-progress-box');
+    if (box) box.style.display = 'none';
+  }
+
+  _showToast(message, type = 'info') {
+    const app = window.__NEXUS_DI && window.__NEXUS_DI.app;
+    if (app && app.notifications && typeof app.notifications.show === 'function') {
+      app.notifications.show(message, type, 2500);
+    } else {
+      console.log(`[${type}] ${message}`);
+    }
+  }
+
+  _fmtBytes(bytes) {
+    if (!bytes) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
   _bindHeaderEvents() {
     const exportBtn = this.container.querySelector('#sx-export');
     const importBtn = this.container.querySelector('#sx-import');
@@ -452,7 +707,12 @@ export class SettingsPanel {
   }
 
   _export() {
-    const data = { settings: this.settings, shortcuts: this.shortcuts, version: 5, exported: Date.now() };
+    const data = {
+      settings: this.settings,
+      shortcuts: this.shortcuts,
+      version: 5,
+      exported: Date.now(),
+    };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -514,7 +774,11 @@ export class SettingsPanel {
       document.documentElement.style.setProperty('--nexus-cyan', a.accentColor);
     }
     if (this.themeManager && a.theme) {
-      try { this.themeManager.apply(a.theme); } catch {}
+      try {
+        this.themeManager.apply(a.theme);
+      } catch (e) {
+        console.warn('[SettingsPanel] theme apply failed', e);
+      }
     }
   }
 
@@ -532,20 +796,26 @@ export class SettingsPanel {
   _saveSettings() {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings));
-    } catch {}
+    } catch (e) {
+      console.warn('[SettingsPanel] save failed', e);
+    }
   }
 
   _saveShortcuts() {
     try {
       localStorage.setItem(SHORTCUTS_KEY, JSON.stringify(this.shortcuts));
-    } catch {}
+    } catch (e) {
+      console.warn('[SettingsPanel] shortcuts save failed', e);
+    }
   }
 
   _loadSettings() {
     try {
       const raw = localStorage.getItem(SETTINGS_KEY);
       if (raw) return this._mergeSettings(JSON.parse(raw));
-    } catch {}
+    } catch (e) {
+      console.warn('[SettingsPanel] load failed', e);
+    }
     return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   }
 
@@ -553,7 +823,9 @@ export class SettingsPanel {
     try {
       const raw = localStorage.getItem(SHORTCUTS_KEY);
       if (raw) return { ...DEFAULT_SHORTCUTS, ...JSON.parse(raw) };
-    } catch {}
+    } catch (e) {
+      console.warn('[SettingsPanel] shortcuts load failed', e);
+    }
     return { ...DEFAULT_SHORTCUTS };
   }
 
