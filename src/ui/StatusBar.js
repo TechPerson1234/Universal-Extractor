@@ -39,6 +39,7 @@ export class StatusBar {
 
   _build() {
     const c = this.container;
+    if (!c) return;
     c.innerHTML = '';
     c.style.cssText = 'height:26px;background:var(--bg-panel);border-top:1px solid #333;display:flex;align-items:center;padding:0 12px;gap:14px;font-size:11px;font-family:monospace;color:var(--text-muted);flex-shrink:0;overflow:hidden;user-select:none;';
 
@@ -159,7 +160,9 @@ export class StatusBar {
     window.addEventListener('online', () => this.setOnline(true));
     window.addEventListener('offline', () => this.setOnline(false));
 
-    this._activityEl.addEventListener('click', () => this.onClickActivity());
+    if (this._activityEl) {
+      this._activityEl.addEventListener('click', () => this.onClickActivity());
+    }
   }
 
   _startUpdates() {
@@ -187,13 +190,15 @@ export class StatusBar {
     this._ramHistory.push(used);
     if (this._ramHistory.length > HISTORY_SIZE) this._ramHistory.shift();
     const mb = (used / 1024 / 1024).toFixed(0);
-    this._metrics.memory.value.textContent = `${mb}M`;
-    if (limit > 0 && used / limit > 0.85) {
-      this._metrics.memory.value.style.color = '#ff003c';
-    } else if (limit > 0 && used / limit > 0.65) {
-      this._metrics.memory.value.style.color = '#ffcc00';
-    } else {
-      this._metrics.memory.value.style.color = '#00ff41';
+    if (this._metrics && this._metrics.memory && this._metrics.memory.value) {
+      this._metrics.memory.value.textContent = `${mb}M`;
+      if (limit > 0 && used / limit > 0.85) {
+        this._metrics.memory.value.style.color = '#ff003c';
+      } else if (limit > 0 && used / limit > 0.65) {
+        this._metrics.memory.value.style.color = '#ffcc00';
+      } else {
+        this._metrics.memory.value.style.color = '#00ff41';
+      }
     }
   }
 
@@ -203,21 +208,26 @@ export class StatusBar {
         const stats = this.chunkStore.getStats();
         this._stats.chunks = stats.cache.entries || 0;
         this._stats.chunkBytes = stats.cache.bytes || 0;
-        this._metrics.chunks.value.textContent = String(this._stats.chunks);
-        const bytes = this._stats.chunkBytes;
-        this._metrics.chunks.wrap.title = `Cache: ${stats.cache.entries} entries (${(bytes / 1024 / 1024).toFixed(1)} MB)`;
+        if (this._metrics && this._metrics.chunks && this._metrics.chunks.value) {
+          this._metrics.chunks.value.textContent = String(this._stats.chunks);
+          const bytes = this._stats.chunkBytes;
+          this._metrics.chunks.wrap.title = `Cache: ${stats.cache.entries} entries (${(bytes / 1024 / 1024).toFixed(1)} MB)`;
+        }
       }
     } catch {}
   }
 
   _updateTime() {
-    const now = new Date();
-    this._timeEl.textContent = now.toTimeString().slice(0, 8);
+    if (this._timeEl && this._timeEl.isConnected) {
+      const now = new Date();
+      this._timeEl.textContent = now.toTimeString().slice(0, 8);
+    }
   }
 
   setStatus(text, type = 'ready') {
     this._stats.status = text;
     this._stats.statusType = type;
+    if (!this._statusEl || !this._led || !this._statusEl.isConnected) return;
     this._statusEl.textContent = text.toUpperCase();
     const colors = {
       ready: '#00ff41',
@@ -239,26 +249,32 @@ export class StatusBar {
 
   setActivity(text) {
     this._stats.activity = text;
+    if (!this._activityEl || !this._activityEl.isConnected) return;
     this._activityEl.textContent = text;
   }
 
   setProgress(progress, label = '') {
     if (progress == null) {
-      this._progressWrap.style.display = 'none';
-      this._progressLabel.style.display = 'none';
+      if (this._progressWrap) this._progressWrap.style.display = 'none';
+      if (this._progressLabel) this._progressLabel.style.display = 'none';
       this._stats.progress = null;
       return;
     }
     const pct = Math.max(0, Math.min(100, progress * 100));
-    this._progressWrap.style.display = 'block';
-    this._progressBar.style.width = pct + '%';
-    this._progressLabel.style.display = 'block';
-    this._progressLabel.textContent = label || `${pct.toFixed(0)}%`;
+    if (this._progressWrap && this._progressBar) {
+      this._progressWrap.style.display = 'block';
+      this._progressBar.style.width = pct + '%';
+    }
+    if (this._progressLabel) {
+      this._progressLabel.style.display = 'block';
+      this._progressLabel.textContent = label || `${pct.toFixed(0)}%`;
+    }
     this._stats.progress = pct;
   }
 
   setOnline(online) {
     this._stats.online = !!online;
+    if (!this._onlineEl || !this._onlineEl.isConnected) return;
     this._onlineEl.textContent = online ? '⬤ ONLINE' : '⬤ OFFLINE';
     this._onlineEl.style.color = online ? '#00ff41' : '#ff003c';
   }
@@ -266,20 +282,26 @@ export class StatusBar {
   setWorkers(active, total) {
     this._stats.workers = total;
     this._stats.workerActive = active;
-    this._metrics.workers.value.textContent = `${active}/${total}`;
-    this._metrics.workers.value.style.color = active > 0 ? '#ffcc00' : '#8a2be2';
+    if (this._metrics && this._metrics.workers && this._metrics.workers.value) {
+      this._metrics.workers.value.textContent = `${active}/${total}`;
+      this._metrics.workers.value.style.color = active > 0 ? '#ffcc00' : '#8a2be2';
+    }
   }
 
   setQueue(count) {
     this._stats.queue = count;
-    this._metrics.queue.value.textContent = String(count);
-    this._metrics.queue.value.style.color = count > 0 ? '#ffcc00' : '#666';
+    if (this._metrics && this._metrics.queue && this._metrics.queue.value) {
+      this._metrics.queue.value.textContent = String(count);
+      this._metrics.queue.value.style.color = count > 0 ? '#ffcc00' : '#666';
+    }
   }
 
   setChunks(count, bytes) {
     this._stats.chunks = count;
     this._stats.chunkBytes = bytes;
-    this._metrics.chunks.value.textContent = String(count);
+    if (this._metrics && this._metrics.chunks && this._metrics.chunks.value) {
+      this._metrics.chunks.value.textContent = String(count);
+    }
   }
 
   updateVFSStats() {
