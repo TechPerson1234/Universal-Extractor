@@ -3,6 +3,7 @@ import { ChunkStore } from './ChunkStore.js';
 const SMALL_FILE_THRESHOLD = 8 * 1024 * 1024;
 const DEFAULT_CHUNK_SIZE = 1024 * 1024;
 const SEARCH_TOKEN_LIMIT = 64;
+const DEFAULT_BLOB_CACHE_BYTES = 512 * 1024 * 1024;
 
 const IMAGE_EXTS = ['png','jpg','jpeg','webp','gif','bmp','svg','ico','avif','tiff'];
 const VIDEO_EXTS = ['mp4','webm','mov','avi','mkv','flv','wmv','m4v','mpg','mpeg'];
@@ -77,9 +78,13 @@ export class VFS {
     this._searchCache = null;
     this._searchCacheDirty = true;
     this._opQueue = Promise.resolve();
+    this._blobCache = new Map();
+    this._blobCacheBytes = 0;
+    this._maxBlobCacheBytes = options.maxBlobCacheBytes || DEFAULT_BLOB_CACHE_BYTES;
     this._stats = {
       ingested: 0, bytesIngested: 0, reads: 0, bytesRead: 0,
       writes: 0, deletes: 0, moves: 0, copies: 0,
+      blobCacheHits: 0, blobCacheMisses: 0, blobCacheEvictions: 0,
     };
   }
 
@@ -142,7 +147,8 @@ export class VFS {
     const store = tx.objectStore(this.metaStore);
     store.clear();
     for (const [path, file] of this.files) {
-      store.put({ ...file, path });
+      const { blob, ...meta } = file;
+      store.put({ ...meta, path });
     }
     return new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
@@ -207,6 +213,11 @@ export class VFS {
       this._indexPath(path);
       this._searchIndex.set(path, this._tokenize(path));
       await this._persistMeta(meta);
+
+      try {
+        this._setBlobCache(path, file);
+      } catch (e) {}
+
       this._stats.ingested++;
       this._stats.bytesIngested += size;
       this._emitChange('ingest', { path, size });
@@ -352,13 +363,97 @@ export class VFS {
       this._indexPath(path);
       this._searchIndex.set(path, this._tokenize(path));
       await this._persistMeta(meta);
+
+      try {
+        this._setBlobCache(path, blob);
+      } catch (e) {}
+
       this._emitChange('add', { path });
       return meta;
     });
   }
 
-  async getFile(path) {
-    return this.files.get(this._normalizePath(path)) || null;
+  async getFile(path, options = {}) {
+    const normalized = this._normalizePath(path);
+    const meta = this.files.get(normalized);
+    if (!meta) return null;
+    if (options.metaOnly) return { ...meta };
+
+    if (this._blobCache.has(normalized)) {
+      this._stats.blobCacheHits++;
+      const cached = this._blobCache.get(normalized);
+      this._blobCache.delete(normalized);
+      this._blobCache.set(normalized, cached);
+      return { ...meta, blob: cached };
+    }
+
+    this._stats.blobCacheMisses++;
+
+    let blob;
+    try {
+      if (!meta.chunkCount) {
+        blob = new Blob([], { type: meta.mimeType || 'application/octet-stream' });
+      } else {
+        const parts = [];
+        for await (const { data } of this.chunkStore.iterateChunks(normalized, meta.chunkCount)) {
+          parts.push(data);
+        }
+        blob = new Blob(parts, { type: meta.mimeType || 'application/octet-stream' });
+      }
+    } catch (err) {
+      console.error('[VFS] getFile materialization failed for', normalized, err);
+      return { ...meta, blob: new Blob([], { type: meta.mimeType || 'application/octet-stream' }) };
+    }
+
+    this._setBlobCache(normalized, blob);
+    return { ...meta, blob };
+  }
+
+  getFileMeta(path) {
+    const normalized = this._normalizePath(path);
+    const meta = this.files.get(normalized);
+    return meta ? { ...meta } : null;
+  }
+
+  _setBlobCache(path, blob) {
+    if (!blob || typeof blob.size !== 'number') return;
+    if (blob.size > this._maxBlobCacheBytes) return;
+    const existing = this._blobCache.get(path);
+    if (existing) {
+      this._blobCacheBytes -= existing.size;
+      this._blobCache.delete(path);
+    }
+    this._blobCache.set(path, blob);
+    this._blobCacheBytes += blob.size;
+    while (this._blobCacheBytes > this._maxBlobCacheBytes && this._blobCache.size > 1) {
+      const firstKey = this._blobCache.keys().next().value;
+      if (firstKey === path) break;
+      const first = this._blobCache.get(firstKey);
+      this._blobCache.delete(firstKey);
+      this._blobCacheBytes -= first.size;
+      this._stats.blobCacheEvictions++;
+    }
+  }
+
+  _invalidateBlobCache(path) {
+    const existing = this._blobCache.get(path);
+    if (existing) {
+      this._blobCacheBytes -= existing.size;
+      this._blobCache.delete(path);
+    }
+  }
+
+  clearBlobCache() {
+    this._blobCache.clear();
+    this._blobCacheBytes = 0;
+  }
+
+  getBlobCacheStats() {
+    return {
+      entries: this._blobCache.size,
+      bytes: this._blobCacheBytes,
+      maxBytes: this._maxBlobCacheBytes,
+    };
   }
 
   async exists(path) {
@@ -382,6 +477,16 @@ export class VFS {
     path = this._normalizePath(path);
     const file = this.files.get(path);
     if (!file) return null;
+
+    if (this._blobCache.has(path)) {
+      this._stats.blobCacheHits++;
+      const cached = this._blobCache.get(path);
+      this._blobCache.delete(path);
+      this._blobCache.set(path, cached);
+      return cached;
+    }
+
+    this._stats.blobCacheMisses++;
     this._stats.reads++;
     const parts = [];
     if (file.chunkCount) {
@@ -390,7 +495,9 @@ export class VFS {
       }
     }
     this._stats.bytesRead += file.size;
-    return new Blob(parts, { type: file.mimeType });
+    const blob = new Blob(parts, { type: file.mimeType || 'application/octet-stream' });
+    this._setBlobCache(path, blob);
+    return blob;
   }
 
   async readRange(path, start, end) {
@@ -444,6 +551,7 @@ export class VFS {
     path = this._normalizePath(path);
     const existing = this.files.get(path);
     if (!existing) return null;
+    this._invalidateBlobCache(path);
     await this.chunkStore.deleteAllChunks(path);
     const result = await this._writeStream(path, blob.stream(), {
       totalSize: blob.size,
@@ -455,6 +563,7 @@ export class VFS {
     existing.modified = Date.now();
     existing.mimeType = blob.type || existing.mimeType;
     await this._persistMeta(existing);
+    this._setBlobCache(path, blob);
     this._emitChange('update', { path });
     return existing;
   }
@@ -465,6 +574,7 @@ export class VFS {
     this.files.delete(path);
     this._searchIndex.delete(path);
     this._searchCacheDirty = true;
+    this._invalidateBlobCache(path);
     await this.chunkStore.deleteFile(path);
     await this._deleteMeta(path);
     this._stats.deletes++;
@@ -479,6 +589,13 @@ export class VFS {
     const file = this.files.get(oldPath);
     if (!file) return false;
     if (this.files.has(newPath)) return false;
+
+    const cachedBlob = this._blobCache.get(oldPath);
+    if (cachedBlob) {
+      this._blobCache.delete(oldPath);
+      this._setBlobCache(newPath, cachedBlob);
+    }
+
     const meta = await this.chunkStore.readMeta(oldPath);
     if (meta) {
       await this.chunkStore.writeMeta(newPath, { ...meta, path: newPath });
@@ -548,8 +665,9 @@ export class VFS {
   async _persistMeta(meta) {
     if (!this.persistence) return;
     await this._openMetaDB();
+    const { blob, ...clean } = meta;
     const tx = this.db.transaction(this.metaStore, 'readwrite');
-    tx.objectStore(this.metaStore).put({ ...meta });
+    tx.objectStore(this.metaStore).put({ ...clean });
   }
 
   async _deleteMeta(path) {
@@ -568,7 +686,8 @@ export class VFS {
       if (!path.startsWith(base) || path === base) continue;
       const rel = path.slice(base.length);
       if (!rel.includes('/')) {
-        items.push({ kind: 'file', ...file });
+        const { blob, ...meta } = file;
+        items.push({ kind: 'file', ...meta });
         seen.add(path);
       } else {
         const folderName = rel.split('/')[0];
@@ -596,7 +715,7 @@ export class VFS {
   }
 
   listAllFiles() {
-    return Array.from(this.files.values());
+    return Array.from(this.files.values()).map(({ blob, ...meta }) => meta);
   }
 
   listAllFolders() {
@@ -625,6 +744,7 @@ export class VFS {
       byType,
       ...this._stats,
       chunkStore: this.chunkStore.getStats(),
+      blobCache: this.getBlobCacheStats(),
     };
   }
 
@@ -638,7 +758,8 @@ export class VFS {
       const name = file.name.toLowerCase();
       const p = path.toLowerCase();
       if (name.includes(lower) || p.includes(lower)) {
-        results.push(this._withScore(file, name === lower ? 100 : p.includes(lower) ? 60 : 40));
+        const { blob, ...meta } = file;
+        results.push(this._withScore(meta, name === lower ? 100 : p.includes(lower) ? 60 : 40));
       }
     }
     return results.sort((a, b) => b.score - a.score);
@@ -649,7 +770,10 @@ export class VFS {
       const re = new RegExp(pattern, flags);
       const results = [];
       for (const [path, file] of this.files) {
-        if (re.test(file.name) || re.test(path)) results.push(file);
+        if (re.test(file.name) || re.test(path)) {
+          const { blob, ...meta } = file;
+          results.push(meta);
+        }
       }
       return results;
     } catch { return []; }
@@ -658,7 +782,10 @@ export class VFS {
   searchByType(type) {
     const results = [];
     for (const file of this.files.values()) {
-      if (file.type === type) results.push(file);
+      if (file.type === type) {
+        const { blob, ...meta } = file;
+        results.push(meta);
+      }
     }
     return results;
   }
@@ -666,7 +793,12 @@ export class VFS {
   searchByTag(tag) {
     const paths = this.tags.get(tag);
     if (!paths) return [];
-    return Array.from(paths).map(p => this.files.get(p)).filter(Boolean);
+    return Array.from(paths).map(p => {
+      const f = this.files.get(p);
+      if (!f) return null;
+      const { blob, ...meta } = f;
+      return meta;
+    }).filter(Boolean);
   }
 
   addTag(path, tag) {
@@ -769,6 +901,7 @@ export class VFS {
     this.tags.clear();
     this._searchIndex.clear();
     this._searchCacheDirty = true;
+    this.clearBlobCache();
     await this.chunkStore.clearAll();
     if (this.persistence) {
       await this._openMetaDB();
@@ -782,6 +915,7 @@ export class VFS {
     await this.saveToDB();
     await this.chunkStore.close();
     if (this.db) { this.db.close(); this.db = null; }
+    this.clearBlobCache();
     this.ready = false;
   }
 
